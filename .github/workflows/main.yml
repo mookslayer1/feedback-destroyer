@@ -1,0 +1,12 @@
+{
+  "name": "Build Feedback Destroyer (macOS)",
+  "on": ["push", "workflow_dispatch"],
+  "jobs": { "build": { "runs-on": "macos-14", "steps": [
+    { "uses": "actions/checkout@v4" },
+    { "name": "Configure", "run": "cmake -B build -DCMAKE_BUILD_TYPE=Release" },
+    { "name": "Build", "run": "cmake --build build --config Release -j 4" },
+    { "name": "Run DSP tests", "run": "./build/core_tests" },
+    { "name": "Sign and zip", "run": "BUNDLE=$(find build -name \"*.vst3\" -maxdepth 6 | head -n 1)\ncodesign --force --deep -s - \"$BUNDLE\"\nditto -c -k --keepParent \"$BUNDLE\" FeedbackDestroyer-VST3-mac.zip" },
+    { "uses": "actions/upload-artifact@v4", "with": { "name": "FeedbackDestroyer-VST3-mac", "path": "FeedbackDestroyer-VST3-mac.zip" } }
+  ] } }
+}
