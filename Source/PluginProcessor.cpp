@@ -3,18 +3,21 @@
 
 namespace
 {
-    constexpr double kQ              = 28.0;   // very narrow notches
-    constexpr float  kStartDepthDb   = 6.f;    // a new notch starts shallow...
-    constexpr float  kDepthStepDb    = 3.f;    // ...and deepens in 3 dB steps while still needed
-    constexpr float  kMinMaxDepthDb  = 6.f;    // Amount = 0   -> deepest cut allowed is 6 dB
-    constexpr float  kMaxMaxDepthDb  = 24.f;   // Amount = 100 -> deepest cut allowed is 24 dB
-    constexpr float  kGainCeilingDb  = 6.f;    // automatic gain never goes above this
-    constexpr float  kGainStepDb     = 0.5f;   // ring-out creeps up this much at a time
-    constexpr double kReadyToLockSec = 4.0;    // a floating notch that has held this long asks to be locked
-    constexpr double kReleaseSec     = 12.0;   // a floating notch nobody needs lets go after this long
-    constexpr double kCoverRatio     = 0.03;   // a notch covers anything within 3% of its frequency
-    constexpr float  kAttackDbPerSec = 240.f;  // how fast a cut is applied
-    constexpr float  kReleaseDbPerSec = 12.f;  // how fast a cut is removed
+    constexpr double kQNarrow         = 28.0;   // pre-show notches: very narrow
+    constexpr double kQLive           = 5.8;    // live notches: about a quarter of an octave wide
+    constexpr float  kStartDepthDb    = 6.f;    // a new pre-show notch starts here...
+    constexpr float  kLiveStartDb     = 4.f;    // ...a new live notch starts a little gentler
+    constexpr float  kDepthStepDb     = 3.f;    // ...and deepens in 3 dB steps while still ringing
+    constexpr float  kMinMaxDepthDb   = 6.f;    // Amount = 0   -> automatic cuts stop at 6 dB
+    constexpr float  kMaxMaxDepthDb   = 24.f;   // Amount = 100 -> automatic cuts stop at 24 dB
+    constexpr float  kHardMaxDepthDb  = 24.f;   // nothing, manual or automatic, goes deeper
+    constexpr float  kSecureExtraDb   = 3.f;    // extra cut added to every notch when the pre-show ends
+    constexpr float  kGainCeilingDb   = 6.f;    // automatic gain never goes above this
+    constexpr float  kGainStepDb      = 0.5f;   // ring-out creeps up this much at a time
+    constexpr float  kProcessMaxSec   = 180.f;  // pre-show stops by itself after this long
+    constexpr double kReleaseSec      = 12.0;   // a live notch nobody needs lets go after this long
+    constexpr float  kAttackDbPerSec  = 240.f;
+    constexpr float  kReleaseDbPerSec = 12.f;
 }
 
 //==============================================================================
@@ -24,6 +27,8 @@ FeedbackDestroyerAudioProcessor::FeedbackDestroyerAudioProcessor()
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", createLayout())
 {
+    for (auto& h : heat)
+        h.store (0.f);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout FeedbackDestroyerAudioProcessor::createLayout()
@@ -38,8 +43,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout FeedbackDestroyerAudioProces
         juce::ParameterID { "amount", 1 }, "Amount",
         juce::NormalisableRange<float> (0.f, 100.f, 0.1f), 40.f));
 
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { "ringout", 1 }, "Ring-out", false));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "mode", 1 }, "Mode", juce::StringArray { "Pre-show", "Live" }, 0));
 
     return layout;
 }
@@ -61,23 +66,18 @@ juce::AudioProcessorEditor* FeedbackDestroyerAudioProcessor::createEditor()
 void FeedbackDestroyerAudioProcessor::prepareToPlay (double sampleRate, int)
 {
     sr = sampleRate;
-    fft = std::make_unique<juce::dsp::FFT> (fftOrder);
 
-    window.assign ((size_t) fftSize, 0.f);
-    juce::dsp::WindowingFunction<float>::fillWindowingTables (
-        window.data(), (size_t) fftSize, juce::dsp::WindowingFunction<float>::hann, false);
+    lowA.prepare (15, 8192);    // 32768 samples: about 1.5 Hz per bin at 48 kHz, for 30 Hz to 400 Hz
+    mainA.prepare (13, 2048);   // 8192 samples: about 6 Hz per bin at 48 kHz, for everything above
 
-    ring.assign ((size_t) fftSize, 0.f);
-    fftData.assign ((size_t) fftSize * 2, 0.f);
-    level.assign ((size_t) fftSize / 2 + 1, -120.f);
-    hist.assign ((size_t) (fftSize / 2 + 1) * 4, -120.f);
-    persist.assign ((size_t) fftSize / 2 + 1, 0);
-    persistNew.assign ((size_t) fftSize / 2 + 1, 0);
+    heatVals.fill (0.f);
+    for (auto& h : heat)
+        h.store (0.f);
 
-    ringPos = hopCount = histFilled = 0;
-    frameCount = 0;
-    settleFrames = creepFrames = 0;
+    highLimitHz.store ((float) highLimit());
     lastGainLin = juce::Decibels::decibelsToGain (gainDb);
+    mainFrames = 0;
+    settleFrames = creepFrames = ceilFrames = 0;
 
     for (auto& n : notches)
     {
@@ -87,10 +87,21 @@ void FeedbackDestroyerAudioProcessor::prepareToPlay (double sampleRate, int)
     }
 }
 
+double FeedbackDestroyerAudioProcessor::highLimit() const
+{
+    return juce::jmin (kMaxHz, 0.45 * sr);   // can't look above what the sample rate allows
+}
+
 float FeedbackDestroyerAudioProcessor::currentMaxDepth() const
 {
     const float amount = apvts.getRawParameterValue ("amount")->load();
     return juce::jmap (amount, 0.f, 100.f, kMinMaxDepthDb, kMaxMaxDepthDb);
+}
+
+float FeedbackDestroyerAudioProcessor::currentPromThr() const
+{
+    const float threshold = apvts.getRawParameterValue ("threshold")->load();
+    return juce::jmap (threshold, 0.f, 100.f, 8.f, 30.f);   // lower Threshold = more sensitive
 }
 
 //==============================================================================
@@ -102,14 +113,19 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
         buffer.clear (i, 0, buffer.getNumSamples());
 
     // Some hosts call processBlock in odd situations while scanning; never touch unprepared buffers.
-    if (fft == nullptr || ring.empty() || buffer.getNumChannels() == 0 || buffer.getNumSamples() == 0)
+    if (! mainA.isReady() || ! lowA.isReady() || buffer.getNumChannels() == 0 || buffer.getNumSamples() == 0)
         return;
 
     handleCommands();
 
+    const bool live = apvts.getRawParameterValue ("mode")->load() > 0.5f;
+    if (live && procState.load() == Running)
+        finishProcess();   // switching to Live ends a pre-show run
+
     const int n   = buffer.getNumSamples();
     const int nch = juce::jmin (buffer.getNumChannels(), 2);
 
+    applyManual();
     updateFilters (n, currentMaxDepth());
 
     // 1. Apply every active notch to the audio.
@@ -127,23 +143,23 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
         }
     }
 
-    // 2. Listen to the result (after the notches), in mono, and analyse it.
+    // 2. Listen to the result (after the notches), in mono, with both analysers.
     const float* l = buffer.getReadPointer (0);
     const float* r = nch > 1 ? buffer.getReadPointer (1) : l;
+    const double hl = highLimit();
 
     for (int s = 0; s < n; ++s)
     {
-        ring[(size_t) ringPos] = 0.5f * (l[s] + r[s]);
-        ringPos = (ringPos + 1) & (fftSize - 1);
+        const float m = 0.5f * (l[s] + r[s]);
 
-        if (++hopCount >= hop)
-        {
-            hopCount = 0;
-            analyse();
-        }
+        if (lowA.push (m))
+            runAnalysis (lowA, kMinHz, juce::jmin (400.0, hl), false, live);
+
+        if (mainA.push (m))
+            runAnalysis (mainA, 400.0, hl, true, live);
     }
 
-    // 3. Automatic output gain (earned during ring-out).
+    // 3. Output gain (earned during the pre-show run, then held).
     const float g = juce::Decibels::decibelsToGain (gainDb);
     buffer.applyGainRamp (0, n, lastGainLin, g);
     lastGainLin = g;
@@ -152,6 +168,28 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
 }
 
 //==============================================================================
+void FeedbackDestroyerAudioProcessor::applyManual()
+{
+    for (int i = 0; i < kSlots; ++i)
+    {
+        auto& n = notches[(size_t) i];
+        if (n.state == Free)
+            continue;
+
+        const float md = info[(size_t) i].manualDepth.load();
+        if (md > 0.f)
+        {
+            n.target = juce::jmin (md, kHardMaxDepthDb);
+            n.pinned = true;
+            n.secured = true;
+        }
+
+        const float mq = info[(size_t) i].manualQ.load();
+        if (mq > 0.f)
+            n.q = juce::jlimit (1.0, 60.0, (double) mq);
+    }
+}
+
 void FeedbackDestroyerAudioProcessor::updateFilters (int numSamples, float maxDepth)
 {
     const float atk = kAttackDbPerSec * (float) numSamples / (float) sr;
@@ -163,11 +201,9 @@ void FeedbackDestroyerAudioProcessor::updateFilters (int numSamples, float maxDe
 
         float want = 0.f;
 
-        if (n.state != Free && ! n.releasing)
-        {
-            const bool switchedOff = (n.state == Latched && ! info[(size_t) i].engaged.load());
-            want = switchedOff ? 0.f : juce::jmin (n.target, maxDepth);
-        }
+        if (n.state != Free && ! n.releasing && info[(size_t) i].engaged.load())
+            want = (n.pinned || n.secured) ? juce::jmin (n.target, kHardMaxDepthDb)
+                                           : juce::jmin (n.target, maxDepth);
 
         if (n.cur < want)       n.cur = juce::jmin (want, n.cur + atk);
         else if (n.cur > want)  n.cur = juce::jmax (want, n.cur - rel);
@@ -180,13 +216,14 @@ void FeedbackDestroyerAudioProcessor::updateFilters (int numSamples, float maxDe
 
         if (n.cur > 0.01f)
         {
-            if (n.cur != n.coefDepth || n.freq != n.coefFreq)
+            if (n.cur != n.coefDepth || n.freq != n.coefFreq || n.q != n.coefQ)
             {
                 for (auto& b : n.bq)
-                    b.setPeak (sr, n.freq, kQ, -(double) n.cur);
+                    b.setPeak (sr, n.freq, n.q, -(double) n.cur);
 
                 n.coefDepth = n.cur;
                 n.coefFreq  = n.freq;
+                n.coefQ     = n.q;
             }
         }
         else
@@ -205,108 +242,77 @@ int FeedbackDestroyerAudioProcessor::findCovering (double f) const
     {
         const auto& n = notches[(size_t) i];
 
-        if (n.state != Free && ! n.releasing && std::abs (f / n.freq - 1.0) < kCoverRatio)
+        if (n.state != Free && ! n.releasing && std::abs (f / n.freq - 1.0) < juce::jmax (0.03, 0.45 / n.q))
             return i;
     }
 
     return -1;
 }
 
-void FeedbackDestroyerAudioProcessor::analyse()
+void FeedbackDestroyerAudioProcessor::updateHeat (const Analyzer& a)
 {
-    const int half = fftSize / 2;
+    if (a.lastHi < a.lastLo)
+        return;
 
-    // --- spectrum of the last 8192 samples --------------------------------
-    for (int j = 0; j < fftSize; ++j)
-        fftData[(size_t) j] = ring[(size_t) ((ringPos + j) & (fftSize - 1))] * window[(size_t) j];
+    const double lo = kMinHz;
+    const double span = std::log (highLimit() / lo);
+    const double binHz = sr / a.size;
 
-    std::fill (fftData.begin() + fftSize, fftData.end(), 0.f);
-    fft->performFrequencyOnlyForwardTransform (fftData.data(), true);
+    float local[kHeatBins] = {};
+    int b0 = kHeatBins, b1 = -1;
 
-    const float norm = 1.f / ((float) fftSize * 0.25f);   // a full-scale sine reads about 0 dB
-    for (int k = 0; k <= half; ++k)
-        level[(size_t) k] = juce::Decibels::gainToDecibels (fftData[(size_t) k] * norm, -120.f);
-
-    // --- find peaks that look like feedback ----------------------------------
-    const float threshold = apvts.getRawParameterValue ("threshold")->load();
-    const float promThr   = juce::jmap (threshold, 0.f, 100.f, 8.f, 30.f);   // lower Threshold = more sensitive
-
-    const int kLo = juce::jmax (14, (int) std::floor (80.0 * fftSize / sr));
-    const int kHi = juce::jmin (half - 16, (int) std::ceil (8000.0 * fftSize / sr));
-
-    struct Cand { float prom; double freq; };
-    Cand cands[8];
-    int numCands = 0;
-
-    std::fill (persistNew.begin(), persistNew.end(), 0);
-    const size_t oldSlot = (size_t) ((frameCount + 1) % 4);   // the frame from 3 frames ago
-
-    for (int k = kLo; k <= kHi; ++k)
+    for (int k = a.lastLo; k <= a.lastHi; ++k)
     {
-        const float lv = level[(size_t) k];
-
-        if (lv < -65.f)
-            continue;
-
-        const bool isPeak = lv > level[(size_t) k - 1] && lv >= level[(size_t) k + 1]
-                         && lv > level[(size_t) k - 2] && lv >= level[(size_t) k + 2];
-        if (! isPeak)
-            continue;
-
-        float sum = 0.f;
-        for (int d = 6; d <= 14; ++d)
-            sum += level[(size_t) (k - d)] + level[(size_t) (k + d)];
-
-        const float prom = lv - sum / 18.f;
-        if (prom < promThr)
-            continue;
-
-        const int p = 1 + juce::jmax (persist[(size_t) k - 1], persist[(size_t) k], persist[(size_t) k + 1]);
-        persistNew[(size_t) k] = p;
-
-        const bool growing = histFilled >= 4
-                          && (lv - hist[oldSlot * (size_t) (half + 1) + (size_t) k]) >= 2.5f;
-        const bool steady  = p >= 20 && prom >= promThr + 6.f;
-
-        if ((p >= 3 && growing) || steady)
-        {
-            // sharpen the frequency estimate between bins
-            const float a = level[(size_t) k - 1], b = lv, c = level[(size_t) k + 1];
-            const float denom = a - 2.f * b + c;
-            const float delta = std::abs (denom) > 1.0e-6f ? 0.5f * (a - c) / denom : 0.f;
-            const double f = ((double) k + juce::jlimit (-0.5f, 0.5f, delta)) * sr / fftSize;
-
-            if (numCands < 8)
-                cands[numCands++] = { prom, f };
-        }
+        const double f = (double) k * binHz;
+        const int b = juce::jlimit (0, kHeatBins - 1, (int) std::floor (std::log (f / lo) / span * kHeatBins));
+        b0 = juce::jmin (b0, b);
+        b1 = juce::jmax (b1, b);
+        local[b] = juce::jmax (local[b], a.peakProm[(size_t) k]);
     }
 
-    persist.swap (persistNew);
+    for (int b = b0; b <= b1; ++b)
+        heatVals[(size_t) b] = juce::jmax (heatVals[(size_t) b] * 0.8f, local[b]);
+}
 
-    std::copy (level.begin(), level.end(), hist.begin() + (size_t) (frameCount % 4) * (size_t) (half + 1));
-    histFilled = juce::jmin (histFilled + 1, 4);
-    ++frameCount;
+void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain, bool live)
+{
+    Candidate cands[8];
+    const int n = a.analyse (sr, lowHz, highHz, currentPromThr(), 1.0, cands, 8);
 
-    std::sort (cands, cands + numCands, [] (const Cand& x, const Cand& y) { return x.prom > y.prom; });
+    updateHeat (a);
 
-    // --- deal with what we found --------------------------------------------
+    const bool acting = live || procState.load() == Running;
+    if (acting && n > 0)
+        handleCandidates (cands, n, live);
+
+    if (isMain)
+        housekeeping (live);
+}
+
+void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, int numCands, bool live)
+{
     const float maxDepth = currentMaxDepth();
-    int newCount = 0;
+    const bool running = procState.load() == Running;
+
+    struct Target { double f; double q; };
+    Target tg[3];
+    int nt = 0;
+
+    double takenF[3] {};
     int taken = 0;
-    double takenFreq[3] {};
 
     for (int c = 0; c < numCands && taken < 3; ++c)
     {
         const double f = cands[c].freq;
 
-        bool duplicate = false;
+        bool dup = false;
         for (int t = 0; t < taken; ++t)
-            if (std::abs (f / takenFreq[t] - 1.0) < kCoverRatio)
-                duplicate = true;
-        if (duplicate)
+            if (std::abs (f / takenF[t] - 1.0) < 0.02)
+                dup = true;
+        if (dup)
             continue;
 
-        takenFreq[taken++] = f;
+        takenF[taken++] = f;
 
         const int idx = findCovering (f);
 
@@ -314,108 +320,240 @@ void FeedbackDestroyerAudioProcessor::analyse()
         {
             auto& n = notches[(size_t) idx];
 
-            // A latched notch the user switched off holds its place: don't re-learn it.
-            if (n.state == Latched && ! info[(size_t) idx].engaged.load())
+            // A notch switched off from the editor holds its place: don't re-learn it.
+            if (! info[(size_t) idx].engaged.load())
                 continue;
 
             // Still ringing despite the notch: deepen it a step, up to the limit.
             n.sinceNeeded = 0;
-            settleFrames = 35;
+            if (running)
+                settleFrames = 35;
 
-            if ((int) (frameCount - n.lastDeepen) > 8 && n.target + kDepthStepDb <= maxDepth + 0.01f)
+            const bool canDeepen = ! n.pinned && (n.state == Floating || running);
+            if (canDeepen && (int) (mainFrames - n.lastDeepen) > 8 && n.target + kDepthStepDb <= maxDepth + 0.01f)
             {
                 n.target += kDepthStepDb;
-                n.lastDeepen = (int) frameCount;
+                n.lastDeepen = (int) mainFrames;
             }
+            continue;
         }
-        else
-        {
-            int slot = -1;
-            for (int i = kLatched; i < kSlots; ++i)
-                if (notches[(size_t) i].state == Free) { slot = i; break; }
 
-            if (slot < 0)
+        // Live: a floating notch within a quarter octave follows the ringing frequency.
+        if (live)
+        {
+            int follow = -1;
+            for (int i = 0; i < kSlots; ++i)
             {
-                // Out of floating notches and still ringing: pull the gain down, quickly.
-                gainDb = juce::jmax (-6.f, gainDb - 3.f);
-                settleFrames = 60;
+                const auto& n = notches[(size_t) i];
+                if (n.state == Floating && ! n.pinned && ! n.releasing && std::abs (f / n.freq - 1.0) < 0.19)
+                {
+                    follow = i;
+                    break;
+                }
+            }
+
+            if (follow >= 0)
+            {
+                notches[(size_t) follow].freq = f;
+                notches[(size_t) follow].sinceNeeded = 0;
                 continue;
             }
+        }
 
-            auto& n = notches[(size_t) slot];
-            n = Notch();
-            n.state = Floating;
-            n.freq = f;
-            n.target = juce::jmin (kStartDepthDb, maxDepth);
-            n.lastDeepen = (int) frameCount;
-            ++newCount;
+        // Pre-show: two close frequencies share one wider notch, freeing a slot.
+        bool merged = false;
+        if (! live)
+        {
+            for (int t = 0; t < nt; ++t)
+            {
+                if (std::abs (f / tg[t].f - 1.0) < 0.12)
+                {
+                    const double f1 = tg[t].f, f2 = f;
+                    const double centre = std::sqrt (f1 * f2);
+                    tg[t].f = centre;
+                    tg[t].q = juce::jlimit (6.0, kQNarrow, centre / (std::abs (f2 - f1) * 1.6 + centre * 0.02));
+                    merged = true;
+                    break;
+                }
+            }
+        }
+
+        if (! merged && nt < 3)
+        {
+            tg[nt].f = f;
+            tg[nt].q = live ? kQLive : kQNarrow;
+            ++nt;
         }
     }
 
-    // --- ring-out gain: notch first, back off, then creep up again --------------
-    if (newCount > 0)
+    int newCount = 0;
+
+    for (int t = 0; t < nt; ++t)
+    {
+        int slot = -1;
+        for (int i = 0; i < kSlots; ++i)
+            if (notches[(size_t) i].state == Free) { slot = i; break; }
+
+        if (slot < 0)
+        {
+            // Out of notches and still ringing: pull the gain down, quickly.
+            gainDb = juce::jmax (-6.f, gainDb - 3.f);
+            settleFrames = 60;
+            fullFlag = true;
+            continue;
+        }
+
+        auto& n = notches[(size_t) slot];
+        n = Notch();
+        n.state = Floating;
+        n.freq = tg[t].f;
+        n.q = tg[t].q;
+        n.target = juce::jmin (live ? kLiveStartDb : kStartDepthDb, maxDepth);
+        n.lastDeepen = (int) mainFrames;
+
+        info[(size_t) slot].manualDepth.store (0.f);
+        info[(size_t) slot].manualQ.store (0.f);
+        info[(size_t) slot].engaged.store (true);
+        ++newCount;
+    }
+
+    // Pre-show: notch first, then back the gain off and pause before creeping again.
+    if (newCount > 0 && running)
     {
         gainDb = juce::jmax (0.f, gainDb - (newCount >= 2 ? 2.f : 1.f));
-        settleFrames = 35;   // about 1.5 s of calm before any creeping resumes
+        settleFrames = 35;   // about 1.5 s of calm
     }
+}
+
+void FeedbackDestroyerAudioProcessor::housekeeping (bool live)
+{
+    ++mainFrames;
+
+    const double hopSec = (double) mainA.hop / sr;
+    const int releaseFrames = (int) (kReleaseSec / hopSec);
+
+    for (auto& n : notches)
+    {
+        if (n.state == Free)
+            continue;
+
+        ++n.sinceNeeded;
+
+        // Only live notches let go. Pre-show notches stay until the run ends and locks them.
+        if (live && n.state == Floating && ! n.pinned && ! n.releasing && n.sinceNeeded >= releaseFrames)
+            n.releasing = true;
+    }
+
+    if (procState.load() != Running)
+        return;
+
+    elapsed += (float) hopSec;
 
     if (settleFrames > 0)
     {
         --settleFrames;
         creepFrames = 0;
+        ceilFrames = 0;
     }
-    else if (apvts.getRawParameterValue ("ringout")->load() > 0.5f && gainDb < kGainCeilingDb)
+    else if (gainDb < kGainCeilingDb)
     {
+        ceilFrames = 0;
         if (++creepFrames >= 12)   // about every half second
         {
             creepFrames = 0;
             gainDb = juce::jmin (kGainCeilingDb, gainDb + kGainStepDb);
         }
     }
-
-    // --- housekeeping: who is ready to lock, who can let go -----------------------
-    const int readyFrames   = (int) (kReadyToLockSec * sr / hop);
-    const int releaseFrames = (int) (kReleaseSec * sr / hop);
-
-    for (int i = 0; i < kSlots; ++i)
+    else if (++ceilFrames >= (int) (3.0 / hopSec))
     {
-        auto& n = notches[(size_t) i];
+        finishProcess();   // reached the gain ceiling and stayed calm
+        return;
+    }
 
+    if (fullFlag || elapsed >= kProcessMaxSec)
+        finishProcess();   // out of notches, or out of time
+}
+
+//==============================================================================
+void FeedbackDestroyerAudioProcessor::startProcess()
+{
+    if (procState.load() == Running)
+        return;
+
+    procState.store (Running);
+    elapsed = 0.f;
+    settleFrames = creepFrames = ceilFrames = 0;
+    fullFlag = false;
+    lowA.clearTracking();
+    mainA.clearTracking();
+}
+
+// Ends the pre-show run: every notch is locked in place, gets its extra safety cut,
+// and the output gain stays where it got to.
+void FeedbackDestroyerAudioProcessor::finishProcess()
+{
+    for (auto& n : notches)
+    {
         if (n.state == Free)
             continue;
 
-        ++n.sinceNeeded;
-
-        if (n.state == Floating && ! n.releasing)
+        if (! n.secured)
         {
-            if (n.sinceNeeded >= readyFrames && ! n.dismissed && pendingSlot.load() == -1)
-                pendingSlot.store (i);
+            if (! n.pinned)
+                n.target = juce::jmin (kHardMaxDepthDb, n.target + kSecureExtraDb);
+            n.secured = true;
+        }
 
-            if (n.sinceNeeded >= releaseFrames && pendingSlot.load() != i)
-                n.releasing = true;
+        n.state = Latched;
+        n.releasing = false;
+    }
+
+    procState.store (Done);
+    creepFrames = ceilFrames = settleFrames = 0;
+}
+
+void FeedbackDestroyerAudioProcessor::lockAll()
+{
+    for (auto& n : notches)
+    {
+        if (n.state != Free)
+        {
+            n.state = Latched;
+            n.releasing = false;
         }
     }
 }
 
-//==============================================================================
+void FeedbackDestroyerAudioProcessor::resetAll()
+{
+    for (int i = 0; i < kSlots; ++i)
+    {
+        notches[(size_t) i] = Notch();
+        info[(size_t) i].engaged.store (true);
+        info[(size_t) i].manualDepth.store (0.f);
+        info[(size_t) i].manualQ.store (0.f);
+    }
+
+    gainDb = 0.f;
+    elapsed = 0.f;
+    settleFrames = creepFrames = ceilFrames = 0;
+    fullFlag = false;
+    procState.store (Idle);
+    lowA.clearTracking();
+    mainA.clearTracking();
+}
+
 void FeedbackDestroyerAudioProcessor::handleCommands()
 {
-    const int cmd = uiCommand.exchange (0);
+    const int cmd = uiCommand.exchange (CmdNone);
 
-    if (cmd == 1)
+    switch (cmd)
     {
-        resetAll();
-    }
-    else if (cmd == 2)
-    {
-        lockPending();
-    }
-    else if (cmd == 3)
-    {
-        const int p = pendingSlot.load();
-        if (p >= 0 && p < kSlots)
-            notches[(size_t) p].dismissed = true;
-        pendingSlot.store (-1);
+        case CmdReset:   resetAll(); break;
+        case CmdStart:   if (apvts.getRawParameterValue ("mode")->load() < 0.5f) startProcess(); break;
+        case CmdStop:    if (procState.load() == Running) finishProcess(); break;
+        case CmdLockAll: lockAll(); break;
+        default: break;
     }
 
     if (restoreFlag.load())
@@ -429,68 +567,30 @@ void FeedbackDestroyerAudioProcessor::handleCommands()
     }
 }
 
-void FeedbackDestroyerAudioProcessor::resetAll()
+void FeedbackDestroyerAudioProcessor::applyRestore()
 {
     for (int i = 0; i < kSlots; ++i)
     {
         notches[(size_t) i] = Notch();
-        info[(size_t) i].engaged.store (true);
-    }
+        info[(size_t) i].manualDepth.store (0.f);
+        info[(size_t) i].manualQ.store (0.f);
 
-    std::fill (persist.begin(), persist.end(), 0);
-    pendingSlot.store (-1);
-    gainDb = 0.f;
-    settleFrames = creepFrames = 0;
-}
-
-void FeedbackDestroyerAudioProcessor::lockPending()
-{
-    const int p = pendingSlot.load();
-    pendingSlot.store (-1);
-
-    if (p < kLatched || p >= kSlots || notches[(size_t) p].state != Floating)
-        return;
-
-    int dst = -1;
-    for (int i = 0; i < kLatched; ++i)
-        if (notches[(size_t) i].state == Free) { dst = i; break; }
-
-    if (dst < 0)
-    {
-        // All 12 latched slots are used: replace the one that has gone longest without work.
-        dst = 0;
-        for (int i = 1; i < kLatched; ++i)
-            if (notches[(size_t) i].sinceNeeded > notches[(size_t) dst].sinceNeeded)
-                dst = i;
-    }
-
-    Notch moved = notches[(size_t) p];
-    moved.state = Latched;
-    moved.releasing = false;
-    moved.dismissed = false;
-    moved.sinceNeeded = 0;
-
-    notches[(size_t) dst] = moved;
-    info[(size_t) dst].engaged.store (true);
-    notches[(size_t) p] = Notch();
-}
-
-void FeedbackDestroyerAudioProcessor::applyRestore()
-{
-    for (int i = 0; i < kLatched; ++i)
-    {
-        notches[(size_t) i] = Notch();
-
-        if (savedPending.valid[i])
+        if (savedPending.valid[(size_t) i])
         {
             auto& n = notches[(size_t) i];
             n.state = Latched;
-            n.freq = savedPending.freq[i];
-            n.target = savedPending.depth[i];
-            n.cur = savedPending.depth[i];
-            info[(size_t) i].engaged.store (savedPending.on[i]);
+            n.freq = savedPending.freq[(size_t) i];
+            n.q = savedPending.q[(size_t) i];
+            n.target = savedPending.depth[(size_t) i];
+            n.cur = savedPending.depth[(size_t) i];
+            n.pinned = savedPending.pinned[(size_t) i];
+            n.secured = true;
+            info[(size_t) i].engaged.store (savedPending.on[(size_t) i]);
         }
     }
+
+    gainDb = savedPending.gain;
+    procState.store (Idle);
 }
 
 void FeedbackDestroyerAudioProcessor::publishInfo()
@@ -501,18 +601,26 @@ void FeedbackDestroyerAudioProcessor::publishInfo()
         info[(size_t) i].state.store (n.state);
         info[(size_t) i].freq.store ((float) n.freq);
         info[(size_t) i].depth.store (n.cur);
+        info[(size_t) i].q.store ((float) n.q);
+        info[(size_t) i].manual.store (n.pinned);
     }
 
+    for (int b = 0; b < kHeatBins; ++b)
+        heat[(size_t) b].store (heatVals[(size_t) b]);
+
     gainDbOut.store (gainDb);
+    elapsedSec.store (elapsed);
+    highLimitHz.store ((float) highLimit());
 }
 
 //==============================================================================
 void FeedbackDestroyerAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    state.setProperty ("gainDb", gainDbOut.load(), nullptr);
 
-    juce::ValueTree latched ("LATCHED");
-    for (int i = 0; i < kLatched; ++i)
+    juce::ValueTree locked ("LOCKED");
+    for (int i = 0; i < kSlots; ++i)
     {
         if (info[(size_t) i].state.load() != Latched)
             continue;
@@ -520,11 +628,13 @@ void FeedbackDestroyerAudioProcessor::getStateInformation (juce::MemoryBlock& de
         juce::ValueTree n ("N");
         n.setProperty ("slot", i, nullptr);
         n.setProperty ("f", info[(size_t) i].freq.load(), nullptr);
-        n.setProperty ("d", juce::jmax (info[(size_t) i].depth.load(), 6.f), nullptr);
+        n.setProperty ("d", juce::jmax (info[(size_t) i].depth.load(), 3.f), nullptr);
+        n.setProperty ("q", info[(size_t) i].q.load(), nullptr);
         n.setProperty ("on", info[(size_t) i].engaged.load(), nullptr);
-        latched.appendChild (n, nullptr);
+        n.setProperty ("m", info[(size_t) i].manual.load(), nullptr);
+        locked.appendChild (n, nullptr);
     }
-    state.appendChild (latched, nullptr);
+    state.appendChild (locked, nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -538,31 +648,34 @@ void FeedbackDestroyerAudioProcessor::setStateInformation (const void* data, int
         return;
 
     auto tree = juce::ValueTree::fromXml (*xml);
-    auto latched = tree.getChildWithName ("LATCHED");
+    auto locked = tree.getChildWithName ("LOCKED");
 
     {
         const juce::SpinLock::ScopedLockType lock (restoreLock);
-        savedPending = SavedLatched();
+        savedPending = Saved();
+        savedPending.gain = (float) (double) tree.getProperty ("gainDb", 0.0);
 
-        for (int c = 0; c < latched.getNumChildren(); ++c)
+        for (int c = 0; c < locked.getNumChildren(); ++c)
         {
-            auto n = latched.getChild (c);
+            auto n = locked.getChild (c);
             const int slot = n.getProperty ("slot", -1);
 
-            if (slot >= 0 && slot < kLatched)
+            if (slot >= 0 && slot < kSlots)
             {
-                savedPending.valid[slot] = true;
-                savedPending.freq[slot]  = (float) (double) n.getProperty ("f", 1000.0);
-                savedPending.depth[slot] = (float) (double) n.getProperty ("d", 6.0);
-                savedPending.on[slot]    = (bool) n.getProperty ("on", true);
+                savedPending.valid[(size_t) slot]  = true;
+                savedPending.freq[(size_t) slot]   = (float) (double) n.getProperty ("f", 1000.0);
+                savedPending.depth[(size_t) slot]  = (float) (double) n.getProperty ("d", 6.0);
+                savedPending.q[(size_t) slot]      = (float) (double) n.getProperty ("q", 28.0);
+                savedPending.on[(size_t) slot]     = (bool) n.getProperty ("on", true);
+                savedPending.pinned[(size_t) slot] = (bool) n.getProperty ("m", false);
             }
         }
 
         restoreFlag.store (true);
     }
 
-    if (latched.isValid())
-        tree.removeChild (latched, nullptr);
+    if (locked.isValid())
+        tree.removeChild (locked, nullptr);
 
     apvts.replaceState (tree);
 }

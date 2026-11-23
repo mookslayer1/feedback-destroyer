@@ -1,6 +1,6 @@
 # Freq'd Out
 
-A 24-notch adaptive feedback suppressor (VST3, macOS). See [DESIGN.md](DESIGN.md)
+A 24-notch feedback suppressor (VST3, macOS) with a pre-show ring-out mode and a live tracking mode. See [DESIGN.md](DESIGN.md)
 for how it works and what is still to be decided.
 
 ## Getting a build
@@ -23,5 +23,5 @@ for how it works and what is still to be decided.
 
 ## Status
 
-First version. Not yet compiled or tested. Test with monitors turned down and a
+Second version (two modes, 30 Hz to 40 kHz, Q and manual depth control). Not yet compiled or tested. Test with monitors turned down and a
 limiter on the output: ringing out a system can produce loud feedback.

@@ -33,6 +33,7 @@ juce_generate_juce_header(FeedbackDestroyer)
 
 target_sources(FeedbackDestroyer PRIVATE
     Source/Biquad.h
+    Source/Analyzer.h
     Source/PluginProcessor.h
     Source/PluginProcessor.cpp
     Source/PluginEditor.h
