@@ -18,14 +18,14 @@ FetchContent_MakeAvailable(JUCE)
 juce_add_plugin(FeedbackDestroyer
     COMPANY_NAME "SJAM Audio"
     BUNDLE_ID com.sjamaudio.freqdout
-    PLUGIN_MANUFACTURER_CODE Fdbk
-    PLUGIN_CODE Fdst
+    PLUGIN_MANUFACTURER_CODE Sjam
+    PLUGIN_CODE Fqdo
     FORMATS VST3
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE
-    PRODUCT_NAME "Freq'd Out")
+    PRODUCT_NAME "Freqd Out")
 
 juce_generate_juce_header(FeedbackDestroyer)
 

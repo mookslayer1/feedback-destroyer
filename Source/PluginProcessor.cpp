@@ -101,6 +101,10 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     for (int i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
+    // Some hosts call processBlock in odd situations while scanning; never touch unprepared buffers.
+    if (fft == nullptr || ring.empty() || buffer.getNumChannels() == 0 || buffer.getNumSamples() == 0)
+        return;
+
     handleCommands();
 
     const int n   = buffer.getNumSamples();

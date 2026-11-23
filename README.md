@@ -12,12 +12,12 @@ for how it works and what is still to be decided.
 
 ## Installing on a Mac
 
-1. Unzip `FeedbackDestroyer-VST3.zip` and copy `Freq'd Out.vst3` into
+1. Unzip `FeedbackDestroyer-VST3.zip` and copy `Freqd Out.vst3` into
    `/Library/Audio/Plug-Ins/VST3/`.
 2. The plugin isn't signed by Apple yet, so macOS will block it. In Terminal, run:
 
    ```
-   xattr -cr "/Library/Audio/Plug-Ins/VST3/Freq'd Out.vst3"
+   xattr -cr "/Library/Audio/Plug-Ins/VST3/Freqd Out.vst3"
    ```
 3. Rescan plugins in your host.
 
