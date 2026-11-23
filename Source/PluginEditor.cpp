@@ -1,142 +1,208 @@
 #include "PluginEditor.h"
 
-void NotchMapComponent::paint (juce::Graphics& g)
+namespace
 {
-    auto r = getLocalBounds().toFloat();
-    g.setColour (juce::Colour (0xff15181d));
-    g.fillRoundedRectangle (r, 6.f);
+    const juce::Colour kBackground (0xff1b1d21);
+    const juce::Colour kStripFill  (0xff23262b);
+    const juce::Colour kGrid       (0xff3a3e45);
+    const juce::Colour kLatched    (0xff5aa9ff);
+    const juce::Colour kFloating   (0xffe0b050);
+    const juce::Colour kOff        (0xff7d8189);
 
-    constexpr float fLo = 20.f, fHi = 20000.f;
-    auto xFor = [&] (float f)
+    juce::String formatFreq (double f)
     {
-        const float t = (std::log10 (juce::jlimit (fLo, fHi, f)) - std::log10 (fLo)) / (std::log10 (fHi) - std::log10 (fLo));
-        return r.getX() + t * r.getWidth();
-    };
-
-    g.setFont (11.f);
-    for (float f : { 50.f, 100.f, 200.f, 500.f, 1000.f, 2000.f, 5000.f, 10000.f })
-    {
-        const float x = xFor (f);
-        g.setColour (juce::Colour (0xff2a2f38));
-        g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
-        g.setColour (juce::Colour (0xff6b7480));
-        g.drawText (f >= 1000.f ? juce::String (f / 1000.f) + "k" : juce::String ((int) f),
-                    juce::Rectangle<float> (x + 2.f, r.getBottom() - 16.f, 40.f, 14.f), juce::Justification::left);
+        if (f >= 1000.0)
+            return juce::String (f / 1000.0, 2) + "k";
+        return juce::String ((int) std::round (f));
     }
-
-    for (int i = 0; i < fd::FeedbackEngine::kMaxBands; ++i)
-    {
-        float f = 0.f, d = 0.f;
-        bool locked = false;
-        proc.getBand (i, f, d, locked);
-        if (f <= 0.f) continue;
-
-        const float x = xFor (f);
-        const float h = juce::jlimit (0.f, 1.f, d / 30.f) * (r.getHeight() - 24.f);
-        g.setColour (locked ? juce::Colour (0xff4da3ff) : juce::Colour (0xffff9a3c));
-        g.fillRect (juce::Rectangle<float> (x - 1.5f, r.getY() + 4.f, 3.f, h));
-        g.setFont (10.f);
-        g.drawText (juce::String ((int) std::round (f)), juce::Rectangle<float> (x - 22.f, r.getY() + 6.f + h, 44.f, 12.f),
-                    juce::Justification::centred);
-    }
-}
-
-void FeedbackDestroyerAudioProcessorEditor::addKnob (Knob& k, const juce::String& paramId, const juce::String& text)
-{
-    addAndMakeVisible (k.slider);
-    k.label.setText (text, juce::dontSendNotification);
-    k.label.setJustificationType (juce::Justification::centred);
-    k.label.attachToComponent (&k.slider, false);
-    addAndMakeVisible (k.label);
-    k.att = std::make_unique<SliderAtt> (proc.apvts, paramId, k.slider);
 }
 
 FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (FeedbackDestroyerAudioProcessor& p)
-    : juce::AudioProcessorEditor (p), proc (p), map (p)
+    : AudioProcessorEditor (&p), proc (p)
 {
-    setSize (640, 400);
-    addAndMakeVisible (map);
+    setSize (680, 450);
 
-    addKnob (strength,    "strength",    "Strength");
-    addKnob (shiftMax,    "shiftMax",    "Max Shift");
-    addKnob (sensitivity, "sensitivity", "Sensitivity");
-    addKnob (maxDepth,    "maxDepth",    "Max Depth");
-    addKnob (q,           "q",           "Notch Q");
-    addKnob (release,     "release",     "Release");
-    addKnob (bands,       "bands",       "Bands");
-
-    speed.addItemList ({ "Slow", "Medium", "Fast" }, 1);
-    linkGroup.addItemList ({ "Off", "1", "2", "3", "4", "5", "6", "7", "8" }, 1);
-    role.addItemList ({ "Channel", "Master" }, 1);
-    for (auto* c : { &speed, &linkGroup, &role }) addAndMakeVisible (c);
-
-    auto setup = [this] (juce::Label& l, const juce::String& t, juce::Component& c)
+    for (auto* s : { &threshold, &amount })
     {
-        l.setText (t, juce::dontSendNotification);
-        l.attachToComponent (&c, true);
-        addAndMakeVisible (l);
-    };
-    setup (speedLabel, "Speed", speed);
-    setup (linkLabel,  "Link group", linkGroup);
-    setup (roleLabel,  "Role", role);
+        s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s->setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
+        s->setColour (juce::Slider::textBoxTextColourId, juce::Colours::white);
+        s->setColour (juce::Slider::rotarySliderFillColourId, kLatched);
+        addAndMakeVisible (*s);
+    }
 
-    speedAtt     = std::make_unique<ComboAtt> (proc.apvts, "speed", speed);
-    linkGroupAtt = std::make_unique<ComboAtt> (proc.apvts, "linkGroup", linkGroup);
-    roleAtt      = std::make_unique<ComboAtt> (proc.apvts, "role", role);
+    thresholdLabel.setText ("Threshold", juce::dontSendNotification);
+    amountLabel.setText ("Amount", juce::dontSendNotification);
 
-    addAndMakeVisible (bypass);
-    bypassAtt = std::make_unique<ButtonAtt> (proc.apvts, "bypass", bypass);
+    for (auto* l : { &thresholdLabel, &amountLabel })
+    {
+        l->setJustificationType (juce::Justification::centred);
+        l->setColour (juce::Label::textColourId, juce::Colours::white);
+        addAndMakeVisible (*l);
+    }
 
-    addAndMakeVisible (lockButton);
-    addAndMakeVisible (clearButton);
-    lockButton.onClick  = [this] { proc.requestLock(); };
-    clearButton.onClick = [this] { proc.requestClear(); };
+    thresholdLabel.attachToComponent (&threshold, false);
+    amountLabel.attachToComponent (&amount, false);
 
-    linkStatus.setJustificationType (juce::Justification::centredLeft);
-    addAndMakeVisible (linkStatus);
+    thresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "threshold", threshold);
+    amountAttachment    = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "amount", amount);
 
-    startTimerHz (4);
-    timerCallback();
+    ringOut.setColour (juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible (ringOut);
+    ringOutAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "ringout", ringOut);
+
+    addAndMakeVisible (resetButton);
+    resetButton.onClick = [this] { proc.uiCommand.store (1); };
+
+    addChildComponent (lockButton);
+    addChildComponent (keepButton);
+    lockButton.onClick = [this] { proc.uiCommand.store (2); };
+    keepButton.onClick = [this] { proc.uiCommand.store (3); };
+
+    startTimerHz (30);
 }
 
-void FeedbackDestroyerAudioProcessorEditor::timerCallback()
+FeedbackDestroyerAudioProcessorEditor::~FeedbackDestroyerAudioProcessorEditor()
 {
-    const int n = proc.instancesInGroup();
-    linkStatus.setText (n > 0 ? juce::String (n) + " instance(s) in this group (same process)" : "Link off",
-                        juce::dontSendNotification);
+    stopTimer();
 }
 
-void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
+float FeedbackDestroyerAudioProcessorEditor::xForFreq (double f) const
 {
-    g.fillAll (juce::Colour (0xff1d2128));
+    f = juce::jlimit (80.0, 8000.0, f);
+    return (float) strip.getX() + (float) (std::log (f / 80.0) / std::log (100.0)) * (float) strip.getWidth();
+}
+
+float FeedbackDestroyerAudioProcessorEditor::yForDb (float db) const
+{
+    return (float) strip.getY() + juce::jlimit (0.f, 24.f, db) / 24.f * (float) strip.getHeight();
 }
 
 void FeedbackDestroyerAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (12);
-    map.setBounds (area.removeFromTop (170));
-    area.removeFromTop (28); // room for knob labels
+    strip = { 56, 64, 580, 190 };
 
-    auto knobRow = area.removeFromTop (96);
-    const int w = knobRow.getWidth() / 7;
-    for (auto* k : { &strength, &shiftMax, &sensitivity, &maxDepth, &q, &release, &bands })
-        k->slider.setBounds (knobRow.removeFromLeft (w).reduced (8, 0));
+    threshold.setBounds (70, 305, 110, 110);
+    amount.setBounds (210, 305, 110, 110);
 
-    area.removeFromTop (12);
-    auto row1 = area.removeFromTop (28);
-    speed.setBounds (row1.removeFromLeft (200).withTrimmedLeft (70));
-    row1.removeFromLeft (16);
-    bypass.setBounds (row1.removeFromLeft (90));
-    row1.removeFromLeft (16);
-    lockButton.setBounds (row1.removeFromLeft (110));
-    row1.removeFromLeft (8);
-    clearButton.setBounds (row1.removeFromLeft (100));
+    ringOut.setBounds (380, 310, 110, 28);
+    resetButton.setBounds (380, 350, 100, 28);
 
-    area.removeFromTop (10);
-    auto row2 = area.removeFromTop (28);
-    linkGroup.setBounds (row2.removeFromLeft (170).withTrimmedLeft (90));
-    row2.removeFromLeft (12);
-    role.setBounds (row2.removeFromLeft (150).withTrimmedLeft (45));
-    row2.removeFromLeft (12);
-    linkStatus.setBounds (row2);
+    lockButton.setBounds (440, 410, 100, 28);
+    keepButton.setBounds (548, 410, 100, 28);
+}
+
+void FeedbackDestroyerAudioProcessorEditor::timerCallback()
+{
+    const bool pending = proc.pendingSlot.load() >= 0;
+    lockButton.setVisible (pending);
+    keepButton.setVisible (pending);
+    repaint();
+}
+
+void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (kBackground);
+
+    g.setColour (juce::Colours::white);
+    g.setFont (20.0f);
+    g.drawText ("Freq'd Out", 20, 14, 300, 28, juce::Justification::centredLeft);
+
+    // --- strip: dB grid ------------------------------------------------------
+    g.setColour (kStripFill);
+    g.fillRect (strip);
+
+    g.setFont (11.0f);
+    for (int db = 0; db <= 24; db += 6)
+    {
+        const float y = yForDb ((float) db);
+        g.setColour (kGrid);
+        g.drawHorizontalLine ((int) y, (float) strip.getX(), (float) strip.getRight());
+        g.setColour (juce::Colours::grey);
+        g.drawText (db == 0 ? "0 dB" : "-" + juce::String (db), 8, (int) y - 8, 44, 16, juce::Justification::centredRight);
+    }
+
+    // --- strip: frequency grid ---------------------------------------------------
+    const double marks[] = { 100, 200, 500, 1000, 2000, 5000, 8000 };
+    for (double f : marks)
+    {
+        const float x = xForFreq (f);
+        g.setColour (kGrid);
+        g.drawVerticalLine ((int) x, (float) strip.getY(), (float) strip.getBottom());
+        g.setColour (juce::Colours::grey);
+        g.drawText (f >= 1000 ? juce::String ((int) (f / 1000)) + "k" : juce::String ((int) f),
+                    (int) x - 20, strip.getBottom() + 3, 40, 16, juce::Justification::centred);
+    }
+
+    // --- the notches, drawn as Graphic EQ faders --------------------------------------
+    for (int i = 0; i < FeedbackDestroyerAudioProcessor::kSlots; ++i)
+    {
+        const int state = proc.info[(size_t) i].state.load();
+        if (state == FeedbackDestroyerAudioProcessor::Free)
+            continue;
+
+        const double f  = proc.info[(size_t) i].freq.load();
+        const float cut = proc.info[(size_t) i].depth.load();
+        const bool latched = state == FeedbackDestroyerAudioProcessor::Latched;
+        const bool engaged = proc.info[(size_t) i].engaged.load();
+
+        const auto colour = ! latched ? kFloating : (engaged ? kLatched : kOff);
+
+        const float x  = xForFreq (f);
+        const float y0 = yForDb (0.f);
+        const float y1 = yForDb (cut);
+
+        g.setColour (colour.withAlpha (0.35f));
+        g.fillRect (x - 3.f, y0, 6.f, juce::jmax (1.f, y1 - y0));
+
+        g.setColour (colour);
+        g.fillRoundedRectangle (x - 8.f, y1 - 3.f, 16.f, 7.f, 2.f);
+
+        g.setFont (10.0f);
+        g.drawText (formatFreq (f), (int) x - 22, (int) y1 + 6, 44, 12, juce::Justification::centred);
+    }
+
+    g.setColour (juce::Colours::grey);
+    g.setFont (12.0f);
+    g.drawText ("Blue: latched   Amber: floating   Grey: switched off (click a latched fader)",
+                strip.getX(), strip.getBottom() + 22, strip.getWidth(), 16, juce::Justification::centredLeft);
+
+    // --- gain readout --------------------------------------------------------------
+    const float gain = proc.gainDbOut.load();
+    g.setColour (juce::Colours::white);
+    g.setFont (15.0f);
+    g.drawText ("Output gain: " + juce::String (gain, 1) + " dB", 500, 314, 170, 20, juce::Justification::centredLeft);
+
+    // --- lock prompt ------------------------------------------------------------------
+    const int pending = proc.pendingSlot.load();
+    if (pending >= 0 && pending < FeedbackDestroyerAudioProcessor::kSlots)
+    {
+        g.setColour (kLatched.withAlpha (0.18f));
+        g.fillRoundedRectangle (20.f, 402.f, 640.f, 44.f, 8.f);
+        g.setColour (juce::Colours::white);
+        g.setFont (14.0f);
+        g.drawText ("Notch at " + formatFreq (proc.info[(size_t) pending].freq.load()) + " is holding. Lock it?",
+                    32, 410, 390, 28, juce::Justification::centredLeft);
+    }
+}
+
+void FeedbackDestroyerAudioProcessorEditor::mouseDown (const juce::MouseEvent& e)
+{
+    if (! strip.expanded (0, 20).contains (e.getPosition()))
+        return;
+
+    int best = -1;
+    float bestDist = 12.f;
+
+    for (int i = 0; i < FeedbackDestroyerAudioProcessor::kLatched; ++i)
+    {
+        if (proc.info[(size_t) i].state.load() != FeedbackDestroyerAudioProcessor::Latched)
+            continue;
+
+        const float d = std::abs (xForFreq (proc.info[(size_t) i].freq.load()) - (float) e.x);
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+
+    if (best >= 0)
+        proc.info[(size_t) best].engaged.store (! proc.info[(size_t) best].engaged.load());
 }

@@ -1,25 +1,40 @@
 #pragma once
-#include <juce_audio_processors/juce_audio_processors.h>
-#include "Core/FeedbackEngine.h"
-#include "Core/LinkRegistry.h"
+#include <JuceHeader.h>
+#include <array>
+#include <atomic>
+#include <vector>
+#include "Biquad.h"
 
-class FeedbackDestroyerAudioProcessor : public juce::AudioProcessor,
-                                        private juce::AudioProcessorValueTreeState::Listener
+class FeedbackDestroyerAudioProcessor : public juce::AudioProcessor
 {
 public:
+    static constexpr int kLatched = 12;
+    static constexpr int kFloating = 12;
+    static constexpr int kSlots = kLatched + kFloating;   // slots 0-11 latched, 12-23 floating
+
+    enum SlotState { Free = 0, Floating = 1, Latched = 2 };
+
+    // What the editor is allowed to look at (written by the audio thread).
+    struct SlotInfo
+    {
+        std::atomic<int>   state   { 0 };
+        std::atomic<float> freq    { 0.f };
+        std::atomic<float> depth   { 0.f };   // current cut in dB (positive number)
+        std::atomic<bool>  engaged { true };  // the editor can switch latched notches on and off
+    };
+
     FeedbackDestroyerAudioProcessor();
-    ~FeedbackDestroyerAudioProcessor() override;
+    ~FeedbackDestroyerAudioProcessor() override = default;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
-    bool isBusesLayoutSupported (const BusesLayout&) const override;
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
-    using juce::AudioProcessor::processBlock;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return JucePlugin_Name; }
+    const juce::String getName() const override { return "Freq'd Out"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -31,46 +46,73 @@ public:
     const juce::String getProgramName (int) override { return {}; }
     void changeProgramName (int, const juce::String&) override {}
 
-    void getStateInformation (juce::MemoryBlock&) override;
-    void setStateInformation (const void*, int) override;
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
 
-    // UI -> audio thread requests (consumed at the top of processBlock)
-    void requestClear() { clearRequested.store (true); }
-    void requestLock()  { lockRequested.store (true); }
-
-    // For the editor
-    void getBand (int i, float& freq, float& depth, bool& locked) const { engine.getBandDisplay (i, freq, depth, locked); }
-    int  instancesInGroup() const;
-
+    // Shared with the editor
     juce::AudioProcessorValueTreeState apvts;
+    std::array<SlotInfo, kSlots> info;
+    std::atomic<int>   pendingSlot { -1 };   // floating notch waiting for "lock it?" (-1 = none)
+    std::atomic<float> gainDbOut { 0.f };    // automatic output gain currently applied
+    std::atomic<int>   uiCommand { 0 };      // 1 = reset, 2 = lock pending, 3 = keep floating
 
 private:
+    struct Notch
+    {
+        int    state = Free;
+        double freq = 0.0;
+        float  cur = 0.f;          // depth being applied right now (dB)
+        float  target = 0.f;       // depth we want (dB)
+        int    sinceNeeded = 0;    // analysis frames since this notch last had work to do
+        int    lastDeepen = 0;
+        bool   releasing = false;
+        bool   dismissed = false;  // user chose "keep floating"
+        double coefFreq = 0.0;
+        float  coefDepth = -1.f;
+        Biquad bq[2];
+    };
+
+    struct SavedLatched
+    {
+        bool  valid[kLatched] {};
+        float freq[kLatched] {};
+        float depth[kLatched] {};
+        bool  on[kLatched] {};
+    };
+
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
-    void parameterChanged (const juce::String& id, float newValue) override;
-    void updateLinkMembership();
 
-    fd::FeedbackEngine engine;
+    void handleCommands();
+    void resetAll();
+    void lockPending();
+    void applyRestore();
+    void updateFilters (int numSamples, float maxDepth);
+    void analyse();
+    int  findCovering (double freq) const;
+    void publishInfo();
+    float currentMaxDepth() const;
 
-    std::atomic<float>* pStrength    = nullptr;
-    std::atomic<float>* pShiftMax    = nullptr;
-    std::atomic<float>* pSensitivity = nullptr;
-    std::atomic<float>* pSpeed       = nullptr;
-    std::atomic<float>* pMaxDepth    = nullptr;
-    std::atomic<float>* pQ           = nullptr;
-    std::atomic<float>* pBands       = nullptr;
-    std::atomic<float>* pRelease     = nullptr;
-    std::atomic<float>* pBypass      = nullptr;
-    std::atomic<float>* pLinkGroup   = nullptr;
-    std::atomic<float>* pRole        = nullptr;
+    std::array<Notch, kSlots> notches;
 
-    std::atomic<bool> clearRequested { false }, lockRequested { false };
+    double sr = 48000.0;
+    static constexpr int fftOrder = 13;
+    static constexpr int fftSize = 1 << fftOrder;   // 8192 samples, about 6 Hz per bin at 48 kHz
+    static constexpr int hop = 2048;                // analysis runs about every 43 ms at 48 kHz
 
-    // Locked bands restored from a saved session, handed to the audio thread.
-    std::array<std::atomic<float>, fd::FeedbackEngine::kMaxBands> pendingFreq, pendingDepth;
-    std::atomic<int>  pendingCount { 0 };
-    std::atomic<bool> pendingApply { false };
+    std::unique_ptr<juce::dsp::FFT> fft;
+    std::vector<float> window, ring, fftData, level, hist;
+    std::vector<int> persist, persistNew;
+    int ringPos = 0, hopCount = 0, histFilled = 0;
+    long frameCount = 0;
 
-    std::atomic<int> joinedGroup { 0 }, joinedRole { 0 };
+    float gainDb = 0.f;
+    float lastGainLin = 1.f;
+    int settleFrames = 0;
+    int creepFrames = 0;
+
+    SavedLatched savedPending;
+    juce::SpinLock restoreLock;
+    std::atomic<bool> restoreFlag { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FeedbackDestroyerAudioProcessor)
 };
