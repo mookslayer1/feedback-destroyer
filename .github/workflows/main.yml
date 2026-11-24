@@ -57,13 +57,12 @@ jobs:
           ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out v3.1.vst3"
 
           mkdir -p scripts
-          cat > scripts/preinstall <<'EOF'
-#!/bin/bash
-set -e
-rm -rf "/Library/Audio/Plug-Ins/VST3/Freq'd Out.vst3"
-rm -rf "/Library/Audio/Plug-Ins/VST3/Freqd Out.vst3"
-exit 0
-EOF
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'set -e' \
+            'rm -rf "/Library/Audio/Plug-Ins/VST3/Freq'"'"'d Out.vst3"' \
+            'rm -rf "/Library/Audio/Plug-Ins/VST3/Freqd Out.vst3"' \
+            'exit 0' > scripts/preinstall
           chmod +x scripts/preinstall
 
           pkgbuild --root pkgroot \
