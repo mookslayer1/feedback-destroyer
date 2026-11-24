@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build for Apple Silicon and Intel")
 
-project(FeedbackDestroyer VERSION 0.1.0)
+project(FeedbackDestroyer VERSION 3.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,7 +26,7 @@ juce_add_plugin(FeedbackDestroyer
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
-    PRODUCT_NAME "Freq'd Out"
+    PRODUCT_NAME "Freqd Out v3.1"
     DESCRIPTION "Adaptive feedback suppression and notch filtering"
     VST3_CATEGORIES "Fx")
 
