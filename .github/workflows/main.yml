@@ -23,11 +23,9 @@ jobs:
           set -euo pipefail
           find build -type d -name '*.vst3' -print
 
-      - name: Sign and package the VST3
+      - name: Sign the VST3
         run: |
           set -euo pipefail
-          mkdir -p dist
-
           bundle="build/FeedbackDestroyer_artefacts/Release/VST3/Freqd Out v3.1.vst3"
 
           if [[ ! -d "$bundle" ]]; then
@@ -38,17 +36,54 @@ jobs:
 
           codesign --force --deep --sign - "$bundle"
 
+      - name: Validate the VST3
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o pluginval.zip \
+            https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          chmod +x pluginval.app/Contents/MacOS/pluginval
+          ./pluginval.app/Contents/MacOS/pluginval \
+            --validate "build/FeedbackDestroyer_artefacts/Release/VST3/Freqd Out v3.1.vst3" \
+            --verbose
+
+      - name: Package the VST3
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bundle="build/FeedbackDestroyer_artefacts/Release/VST3/Freqd Out v3.1.vst3"
+
           mkdir -p pkgroot/Library/Audio/Plug-Ins/VST3
           ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out v3.1.vst3"
 
+          mkdir -p scripts
+          cat > scripts/preinstall <<'EOF'
+#!/bin/bash
+set -e
+rm -rf "/Library/Audio/Plug-Ins/VST3/Freq'd Out.vst3"
+rm -rf "/Library/Audio/Plug-Ins/VST3/Freqd Out.vst3"
+exit 0
+EOF
+          chmod +x scripts/preinstall
+
           pkgbuild --root pkgroot \
+            --scripts scripts \
             --identifier com.sjamaudio.freqdout.vst3 \
-            --version 3.1.0 \
+            --version 3.1.1 \
             --install-location / \
             "dist/FreqdOut-v3.1-macOS.pkg"
+
+          ditto -c -k --keepParent "$bundle" \
+            "dist/FreqdOut-v3.1-macOS.zip"
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
           name: FreqdOut-v3.1-macOS-installer
           path: dist/FreqdOut-v3.1-macOS.pkg
+
+      - name: Upload the uncompressed VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreqdOut-v3.1-macOS-zip
+          path: dist/FreqdOut-v3.1-macOS.zip

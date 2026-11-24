@@ -8,11 +8,13 @@ for how it works and what is still to be decided.
 1. Open the **Actions** tab on GitHub and click the latest run.
 2. When it finishes with a green tick, scroll to **Artifacts** and download
    `FreqdOut-v3.1-macOS-installer`.
-3. Unzip it and run `FreqdOut-v3.1-macOS.pkg`.
+3. Run `FreqdOut-v3.1-macOS.pkg`.
+
+The workflow also uploads `FreqdOut-v3.1-macOS-zip` for direct testing without the installer.
 
 ## Installing on a Mac
 
-The installer places the plugin at:
+The installer removes the older `Freq'd Out.vst3` and `Freqd Out.vst3` bundles, then installs:
 
 ```text
 /Library/Audio/Plug-Ins/VST3/Freqd Out v3.1.vst3
@@ -28,5 +30,5 @@ xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/VST3/Freqd Out v3.1.vst3
 
 ## Status
 
-Second version (two modes, 30 Hz to 40 kHz, Q and manual depth control). Test with monitors turned down and a
+Version 3.1.1 adds legacy-bundle cleanup and automated pluginval validation. Test with monitors turned down and a
 limiter on the output: ringing out a system can produce loud feedback.
