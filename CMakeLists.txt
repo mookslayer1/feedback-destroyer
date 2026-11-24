@@ -26,8 +26,9 @@ juce_add_plugin(FeedbackDestroyer
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
-    COPY_PLUGIN_AFTER_BUILD FALSE
-    PRODUCT_NAME "Freqd Out")
+    PRODUCT_NAME "Freq'd Out"
+    DESCRIPTION "Adaptive feedback suppression and notch filtering"
+    VST3_CATEGORIES "Fx")
 
 juce_generate_juce_header(FeedbackDestroyer)
 

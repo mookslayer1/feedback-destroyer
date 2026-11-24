@@ -1,8 +1,8 @@
-name: Build Feedback Destroyer (macOS)
+name: Build Freq'd Out (macOS)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, freqd-out-installer ]
   workflow_dispatch:
 
 jobs:
@@ -18,16 +18,32 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Sign and zip the VST3
+      - name: Sign and package the VST3
         run: |
+          set -euo pipefail
           mkdir -p dist
-          bundle=$(find build -name "*.vst3" -type d -prune | head -n 1)
-          echo "Found: $bundle"
-          codesign --force --deep -s - "$bundle"
-          ditto -c -k --keepParent "$bundle" dist/FeedbackDestroyer-VST3-mac.zip
 
-      - name: Upload the plugin
+          bundle="build/FeedbackDestroyer_artefacts/Release/VST3/Freq'd Out.vst3"
+
+          if [[ ! -d "$bundle" ]]; then
+            echo "Expected VST3 bundle not found: $bundle"
+            find build -type d -name '*.vst3' -print
+            exit 1
+          fi
+
+          codesign --force --deep --sign - "$bundle"
+
+          mkdir -p pkgroot/Library/Audio/Plug-Ins/VST3
+          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freq'd Out.vst3"
+
+          pkgbuild --root pkgroot \
+            --identifier com.sjamaudio.freqdout.vst3 \
+            --version 0.1.0 \
+            --install-location / \
+            "dist/FreqdOut-VST3-macOS.pkg"
+
+      - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: FeedbackDestroyer-VST3-mac
-          path: dist/FeedbackDestroyer-VST3-mac.zip
+          name: FreqdOut-VST3-macOS-installer
+          path: dist/FreqdOut-VST3-macOS.pkg
