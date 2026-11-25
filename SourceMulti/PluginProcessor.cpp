@@ -4,14 +4,14 @@
 namespace
 {
     constexpr double kQNarrow         = 28.0;   // narrow, surgical static notch
-    constexpr double kQWidest         = 3.0;    // widest a merged notch may become
+    constexpr double kQWidest         = 6.0;    // widest a merged notch may become (kept narrower to protect tone)
     constexpr float  kStartDepthDb    = 6.f;    // initial Pre-Show cut
     constexpr float  kDepthStepDb     = 3.f;    // additional cut while a notch is still needed
-    constexpr float  kHardMaxDepthDb  = 24.f;   // safety ceiling for an automatically deployed notch
+    constexpr float  kHardMaxDepthDb  = 24.f;   // absolute ceiling (manual faders); automatic cuts use the Max cut control
     constexpr float  kWatchBonusDb    = 6.f;    // extra sensitivity inside bands the burst flagged
     constexpr float  kBurstMaxDb      = -20.f;  // loudest the burst may auto-raise to
     constexpr float  kPromThr         = 18.f;   // fixed internal detection prominence
-    constexpr float  kGainCeilingDb   = 6.f;
+    constexpr int    kMaxVerifyCycles = 4;      // verify -> ring-out repeats before giving up
     constexpr float  kGainStepDb      = 0.5f;
     constexpr float  kProcessMaxSec   = 600.f;   // backstop only; a run normally ends when quiet at the gain ceiling
     constexpr float  kAttackDbPerSec  = 240.f;
@@ -49,6 +49,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout FeedbackDestroyerAudioProces
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "safety", 1 }, "Safety cut",
         juce::NormalisableRange<float> (0.f, 6.f, 0.5f), 3.f));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "push", 1 }, "Test gain",
+        juce::NormalisableRange<float> (6.f, 18.f, 1.f), 12.f));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "maxCut", 1 }, "Max cut",
+        juce::NormalisableRange<float> (6.f, 24.f, 1.f), 12.f));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "burstLevel", 1 }, "Burst level",
@@ -117,6 +125,7 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
         return;
 
     handleCommands();
+    maxCutDb = apvts.getRawParameterValue ("maxCut")->load();
 
     const int n   = buffer.getNumSamples();
     const int nch = juce::jmin (buffer.getNumChannels(), 2);
@@ -322,7 +331,7 @@ bool FeedbackDestroyerAudioProcessor::mergeIntoExisting (double f, double maxRat
 
     n.freq = centre;
     n.q = juce::jmin (n.q, juce::jlimit (kQWidest, kQNarrow, reqQ));
-    n.target = juce::jmax (n.target, kStartDepthDb);
+    n.target = juce::jmin (depthLimit (n), juce::jmax (n.target, kStartDepthDb));
     n.sinceNeeded = 0;
     settleFrames = 35;
     return true;
@@ -355,7 +364,12 @@ void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, do
         handleCandidates (cands, n);
 
         if (st == Verifying)
-            endVerify (false);
+        {
+            if (++verifyCycles < kMaxVerifyCycles)
+                resumeRingOut();     // not clean yet: keep ringing out with the new notches
+            else
+                endVerify (false);
+        }
     }
 
     if (isMain)
@@ -396,11 +410,21 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
             n.sinceNeeded = 0;
             settleFrames = 35;
 
-            if (! n.pinned && (int) (mainFrames - n.lastDeepen) > 8
-                && n.target + kDepthStepDb <= kHardMaxDepthDb + 0.01f)
+            if (! n.pinned && (int) (mainFrames - n.lastDeepen) > 8)
             {
-                n.target += kDepthStepDb;
-                n.lastDeepen = (int) mainFrames;
+                if (n.target + kDepthStepDb <= depthLimit (n) + 0.01f)
+                {
+                    n.target += kDepthStepDb;
+                    n.lastDeepen = (int) mainFrames;
+                }
+                else
+                {
+                    // At the cut limit and still ringing: back the test gain off instead of cutting more tone.
+                    gainDb = juce::jmax (0.f, gainDb - 1.f);
+                    ceilingDb = juce::jmin (ceilingDb, gainDb);
+                    limitedByCut.store (true);
+                    n.lastDeepen = (int) mainFrames;
+                }
             }
 
             continue;
@@ -503,14 +527,14 @@ void FeedbackDestroyerAudioProcessor::housekeeping()
     if (st == Verifying)
     {
         stageTime += (float) hopSec;
-        stageProgress.store (juce::jlimit (0.f, 1.f, (verifyGain - kGainCeilingDb) / juce::jmax (1.f, verifyMaxExtraDb)));
+        stageProgress.store (juce::jlimit (0.f, 1.f, (verifyGain - ceilingDb) / juce::jmax (1.f, verifyMaxExtraDb)));
 
         if (stageTime >= verifyHoldSec)
         {
             verifyClean = verifyGain;
             stageTime = 0.f;
 
-            if (verifyGain + 3.f > kGainCeilingDb + verifyMaxExtraDb + 0.01f)
+            if (verifyGain + 3.f > ceilingDb + verifyMaxExtraDb + 0.01f)
                 endVerify (true);
             else
             {
@@ -533,14 +557,14 @@ void FeedbackDestroyerAudioProcessor::housekeeping()
         creepFrames = 0;
         ceilFrames = 0;
     }
-    else if (gainDb < kGainCeilingDb)
+    else if (gainDb < ceilingDb)
     {
         ceilFrames = 0;
 
         if (++creepFrames >= 12)
         {
             creepFrames = 0;
-            gainDb = juce::jmin (kGainCeilingDb, gainDb + kGainStepDb);
+            gainDb = juce::jmin (ceilingDb, gainDb + kGainStepDb);
         }
     }
     else if (++ceilFrames >= (int) (3.0 / hopSec))
@@ -570,6 +594,9 @@ void FeedbackDestroyerAudioProcessor::startProcess()
     verifyMaxExtraDb = stageMode == 2 ? 9.f : 6.f;
 
     gainDb = 0.f;                       // measure the room at unity so the margin reading is meaningful
+    ceilingDb = juce::jlimit (6.f, 18.f, apvts.getRawParameterValue ("push")->load());
+    verifyCycles = 0;
+    limitedByCut.store (false);
     elapsed = 0.f;
     settleFrames = creepFrames = ceilFrames = 0;
     fullFlag = false;
@@ -597,6 +624,21 @@ void FeedbackDestroyerAudioProcessor::beginListen()
     stageTime = 0.f;
     stageProgress.store (0.f);
     procState.store (Listening);
+}
+
+float FeedbackDestroyerAudioProcessor::depthLimit (const Notch& n) const
+{
+    const float lim = juce::jlimit (6.f, kHardMaxDepthDb, maxCutDb);
+    return n.q < 10.0 ? juce::jmin (lim, 9.f) : lim;     // wide notches take more tone, so they stay shallower
+}
+
+void FeedbackDestroyerAudioProcessor::resumeRingOut()
+{
+    gainDb = juce::jmin (ceilingDb, verifyClean);
+    settleFrames = 35;
+    creepFrames = ceilFrames = 0;
+    stageProgress.store (0.f);
+    procState.store (Running);
 }
 
 int FeedbackDestroyerAudioProcessor::heatBinFor (double f) const
@@ -872,9 +914,9 @@ void FeedbackDestroyerAudioProcessor::beginVerify()
 void FeedbackDestroyerAudioProcessor::endVerify (bool clean)
 {
     secureAll();
-    verifiedExtraDb.store (juce::jmax (0.f, verifyClean - kGainCeilingDb));
+    verifiedExtraDb.store (juce::jmax (0.f, verifyClean));   // highest gain that held clean
     verifyResult.store (clean ? 1 : 2);
-    gainDb = juce::jmin (kGainCeilingDb, verifyClean);
+    gainDb = 0.f;                    // the raised gain was only test pressure; leave the channel at unity
     endReason.store (EndCeiling);
     procState.store (Done);
     creepFrames = ceilFrames = settleFrames = 0;
@@ -892,7 +934,7 @@ void FeedbackDestroyerAudioProcessor::secureAll()
         if (! n.secured)
         {
             if (! n.pinned)
-                n.target = juce::jmin (kHardMaxDepthDb, n.target + safetyDbNow);
+                n.target = juce::jmin (juce::jmax (n.target, depthLimit (n)), n.target + safetyDbNow);
 
             n.secured = true;
         }
@@ -979,6 +1021,7 @@ void FeedbackDestroyerAudioProcessor::finishProcess (int reason)
     }
 
     endReason.store (reason);
+    gainDb = 0.f;
     procState.store (Done);
     creepFrames = ceilFrames = settleFrames = 0;
 }

@@ -76,6 +76,7 @@ public:
     std::atomic<float> burstLevelUsedDb { -35.f };
     std::atomic<float> loopMarginDb { 0.f };              // estimated margin to feedback at 0 dB plugin gain
     std::atomic<int>   suspectCount { 0 };
+    std::atomic<bool>  limitedByCut { false };            // test gain was held back by the Max cut limit
     std::atomic<int>   verifyResult { 0 };                // 0 not run, 1 clean, 2 feedback appeared
     std::atomic<float> verifiedExtraDb { 0.f };           // clean headroom found above the working gain
 
@@ -114,6 +115,8 @@ private:
     bool buildSuspectMap();
     void finishBurst();
     void beginRingOut();
+    void resumeRingOut();
+    float depthLimit (const Notch& n) const;
     void beginVerify();
     void endVerify (bool clean);
     void secureAll();
@@ -164,6 +167,8 @@ private:
     float stageTime = 0.f;
     float verifyGain = 0.f, verifyClean = 0.f;
     float safetyDbNow = 3.f;
+    float ceilingDb = 12.f, maxCutDb = 12.f;
+    int   verifyCycles = 0;
     std::array<float, kHeatBins> roomVals {}, suspectVals {};
 
     Saved savedPending;

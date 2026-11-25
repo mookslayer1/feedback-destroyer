@@ -30,9 +30,9 @@ private:
     juce::TextButton lockAllButton { "Lock all" };
     juce::TextButton resetButton { "Reset" };
 
-    juce::Slider lowLimitSlider, safetySlider, burstSlider;
+    juce::Slider lowLimitSlider, safetySlider, burstSlider, pushSlider, maxCutSlider;
     juce::ComboBox modeBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lowLimitAttach, safetyAttach, burstAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lowLimitAttach, safetyAttach, burstAttach, pushAttach, maxCutAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttach;
 
     juce::Rectangle<int> strip, heatStrip;

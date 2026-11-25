@@ -23,7 +23,7 @@ namespace
 FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (FeedbackDestroyerAudioProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    setSize (760, 570);
+    setSize (760, 600);
 
     for (auto* button : { &startButton, &lockAllButton, &resetButton })
     {
@@ -55,6 +55,16 @@ FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (Fe
     addAndMakeVisible (burstSlider);
     burstAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         proc.apvts, "burstLevel", burstSlider);
+
+    for (auto* sl : { &pushSlider, &maxCutSlider })
+    {
+        sl->setSliderStyle (juce::Slider::LinearHorizontal);
+        sl->setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
+        sl->setTextValueSuffix (" dB");
+        addAndMakeVisible (*sl);
+    }
+    pushAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "push", pushSlider);
+    maxCutAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "maxCut", maxCutSlider);
 
     modeBox.addItemList ({ "Quick", "Standard", "Thorough" }, 1);
     addAndMakeVisible (modeBox);
@@ -129,6 +139,8 @@ void FeedbackDestroyerAudioProcessorEditor::resized()
     modeBox.setBounds (610, 478, 96, 24);
     safetySlider.setBounds (150, 508, 240, 24);
     burstSlider.setBounds (466, 508, 240, 24);
+    pushSlider.setBounds (150, 538, 240, 24);
+    maxCutSlider.setBounds (466, 538, 240, 24);
 }
 
 void FeedbackDestroyerAudioProcessorEditor::timerCallback()
@@ -322,7 +334,7 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
     if (ps == FeedbackDestroyerAudioProcessor::Listening)
         status = "LISTENING  -  learning the room's own tones   " + juce::String (pct) + "%";
     else if (ps == FeedbackDestroyerAudioProcessor::Measuring)
-        status = "MEASURING  -  smooth noise burst at " + juce::String (proc.burstLevelUsedDb.load(), 0)
+        status = "MEASURING  -  smooth noise burst at " + juce::String (juce::roundToInt (proc.burstLevelUsedDb.load()))
                + " dB, checking where the room rings   " + juce::String (pct) + "%";
     else if (ps == FeedbackDestroyerAudioProcessor::Verifying)
         status = "VERIFYING  -  lifting the gain to check the headroom left   " + juce::String (pct) + "%";
@@ -344,10 +356,13 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
             status += "  (" + juce::String (proc.tidiedAtEnd.load()) + " overlapping merged)";
 
         if (proc.verifyResult.load() == 1)
-            status += "  -  verified clean to +" + juce::String (proc.verifiedExtraDb.load(), 0) + " dB beyond the working gain";
+            status = "COMPLETE  -  clean to +" + juce::String (juce::roundToInt (proc.verifiedExtraDb.load())) + " dB test gain, notches locked";
         else if (proc.verifyResult.load() == 2)
-            status += "  -  feedback appeared " + juce::String (proc.verifiedExtraDb.load() + 3.f, 0)
-                    + " dB beyond the working gain; notch added";
+            status = "LOCKED  -  clean to +" + juce::String (juce::roundToInt (proc.verifiedExtraDb.load()))
+                   + " dB; feedback persisted above that";
+
+        if (proc.limitedByCut.load())
+            status += "  (held back by Max cut)";
     }
     else
         status = "Press START: listen, measure, ring out, verify (running again keeps the existing notches)";
@@ -357,7 +372,7 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
         juce::String sum = "Room tones learned: " + juce::String (proc.toneCount.load());
 
         if (proc.burstResult.load() == 1)
-            sum += "     Estimated margin to feedback: about " + juce::String (proc.loopMarginDb.load(), 0)
+            sum += "     Estimated margin to feedback: about " + juce::String (juce::roundToInt (proc.loopMarginDb.load()))
                  + " dB     Watched bands: " + juce::String (proc.suspectCount.load());
         else if (proc.burstResult.load() == 2)
             sum += "     Burst could not be heard clearly over the room; ring-out ran without a map";
@@ -378,11 +393,20 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
     g.drawText ("Stages", 548, 478, 56, 24, juce::Justification::centredLeft);
     g.drawText ("Safety cut", 56, 508, 90, 24, juce::Justification::centredLeft);
     g.drawText ("Burst level", 394, 508, 70, 24, juce::Justification::centredLeft);
+    g.drawText ("Test gain", 56, 538, 90, 24, juce::Justification::centredLeft);
+    g.drawText ("Max cut", 394, 538, 70, 24, juce::Justification::centredLeft);
     g.setColour (juce::Colours::white);
     g.setFont (14.0f);
-    g.drawText ("Output gain: " + juce::String (proc.gainDbOut.load(), 1) + " dB     Notches: "
+    double costOct = 0.0;
+    for (int i = 0; i < FeedbackDestroyerAudioProcessor::kSlots; ++i)
+        if (proc.info[(size_t) i].state.load() != FeedbackDestroyerAudioProcessor::Free && proc.info[(size_t) i].engaged.load())
+            costOct += (double) proc.info[(size_t) i].depth.load() * 1.44 / juce::jmax (1.0, (double) proc.info[(size_t) i].q.load());
+    const double totalOct = std::log2 (juce::jmax (1000.0, (double) proc.highLimitHz.load()) / 30.0);
+
+    g.drawText ("Gain: " + juce::String (proc.gainDbOut.load(), 1) + " dB     Notches: "
                     + juce::String (active) + " / "
-                    + juce::String (FeedbackDestroyerAudioProcessor::kSlots),
+                    + juce::String (FeedbackDestroyerAudioProcessor::kSlots)
+                    + "     Tone cost: about " + juce::String (costOct / totalOct, 1) + " dB averaged over the band",
                 56, 422, 650, 20, juce::Justification::centredLeft);
 
     if (selected >= 0 && proc.info[(size_t) selected].state.load()
