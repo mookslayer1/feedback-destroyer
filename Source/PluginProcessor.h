@@ -9,7 +9,7 @@
 class FeedbackDestroyerAudioProcessor : public juce::AudioProcessor
 {
 public:
-    static constexpr int kSlots = 24;        // Pre-Show notch bank
+    static constexpr int kSlots = 48;        // notch bank
     static constexpr int kHeatBins = 64;     // resolution of the heat strip
     static constexpr double kMinHz = 30.0;
     static constexpr double kMaxHz = 40000.0;
@@ -17,6 +17,7 @@ public:
     enum SlotState { Free = 0, Floating = 1, Latched = 2 };
     enum ProcState { Idle = 0, Running = 1, Done = 2 };
     enum Command { CmdNone = 0, CmdReset = 1, CmdStart = 2, CmdStop = 3, CmdLockAll = 4 };
+    enum EndReason { EndNone = 0, EndCeiling = 1, EndOutOfNotches = 2, EndTimeLimit = 3, EndStopped = 4 };
 
     struct SlotInfo
     {
@@ -62,6 +63,7 @@ public:
     std::atomic<float> gainDbOut { 0.f };
     std::atomic<float> elapsedSec { 0.f };
     std::atomic<float> highLimitHz { 20000.f };
+    std::atomic<int>   endReason { EndNone };
 
 private:
     struct Notch
@@ -93,16 +95,16 @@ private:
     void handleCommands();
     void resetAll();
     void startProcess();
-    void finishProcess();
+    void finishProcess (int reason);
     void lockAll();
-    void releaseLiveNotch();
     void applyRestore();
     void applyManual();
     void updateFilters (int numSamples);
-    void runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain, bool live);
-    void handleCandidates (const Candidate* cands, int numCands, bool live);
-    void handleLiveCandidate (const Candidate& cand);
-    void housekeeping (bool live);
+    void runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain);
+    void handleCandidates (const Candidate* cands, int numCands);
+    bool mergeIntoExisting (double freq, double maxRatio);
+    int  freeSlotCount() const;
+    void housekeeping();
     void updateHeat (const Analyzer& a);
     int  findCovering (double freq) const;
     void publishInfo();
@@ -120,7 +122,6 @@ private:
     float elapsed = 0.f;
     int settleFrames = 0, creepFrames = 0, ceilFrames = 0;
     bool fullFlag = false;
-    bool lastLive = false;
 
     Saved savedPending;
     juce::SpinLock restoreLock;

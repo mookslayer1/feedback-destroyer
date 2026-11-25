@@ -25,7 +25,7 @@ FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (Fe
 {
     setSize (760, 530);
 
-    for (auto* button : { &preShowButton, &liveButton, &startButton, &lockAllButton, &resetButton })
+    for (auto* button : { &startButton, &lockAllButton, &resetButton })
     {
         button->setColour (juce::TextButton::buttonColourId, kStripFill);
         button->setColour (juce::TextButton::textColourOffId, juce::Colours::white);
@@ -33,21 +33,14 @@ FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (Fe
         addAndMakeVisible (*button);
     }
 
-    preShowButton.setColour (juce::TextButton::buttonOnColourId, kLatched);
-    liveButton.setColour (juce::TextButton::buttonOnColourId, kFloating);
     startButton.setColour (juce::TextButton::buttonOnColourId, kLatched);
 
-    preShowButton.onClick = [this]
-    {
-        if (proc.apvts.getRawParameterValue ("mode")->load() > 0.5f)
-            proc.apvts.getParameter ("mode")->setValueNotifyingHost (0.0f);
-    };
-
-    liveButton.onClick = [this]
-    {
-        if (proc.apvts.getRawParameterValue ("mode")->load() < 0.5f)
-            proc.apvts.getParameter ("mode")->setValueNotifyingHost (1.0f);
-    };
+    lowLimitSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    lowLimitSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
+    lowLimitSlider.setTextValueSuffix (" Hz");
+    addAndMakeVisible (lowLimitSlider);
+    lowLimitAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        proc.apvts, "lowLimit", lowLimitSlider);
 
     startButton.onClick = [this]
     {
@@ -106,20 +99,15 @@ void FeedbackDestroyerAudioProcessorEditor::resized()
     heatStrip = { 56, 58, 650, 36 };
     strip     = { 56, 104, 650, 190 };
 
-    preShowButton.setBounds (330, 14, 100, 30);
-    liveButton.setBounds (434, 14, 76, 30);
-    startButton.setBounds (522, 14, 88, 30);
-    lockAllButton.setBounds (618, 14, 82, 30);
-    resetButton.setBounds (706, 14, 0, 0);
+    startButton.setBounds (440, 14, 88, 30);
+    lockAllButton.setBounds (536, 14, 88, 30);
+    resetButton.setBounds (632, 14, 74, 30);
+    lowLimitSlider.setBounds (150, 478, 360, 24);
 }
 
 void FeedbackDestroyerAudioProcessorEditor::timerCallback()
 {
-    const bool live = proc.apvts.getRawParameterValue ("mode")->load() > 0.5f;
     const bool running = proc.procState.load() == FeedbackDestroyerAudioProcessor::Running;
-
-    preShowButton.setToggleState (! live, juce::dontSendNotification);
-    liveButton.setToggleState (live, juce::dontSendNotification);
 
     startButton.setButtonText (running ? "STOP" : "START");
     startButton.setToggleState (running, juce::dontSendNotification);
@@ -239,43 +227,55 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
             g.drawVerticalLine ((int) x, (float) strip.getY(), (float) strip.getBottom());
         }
 
-        g.setFont (10.0f);
-        g.setColour (colour);
-        g.drawText (formatFreq (f), (int) x - 22, (int) y1 + 6, 44, 12,
-                    juce::Justification::centred);
+        if (i == hovered || i == selected)
+        {
+            g.setFont (10.0f);
+            g.setColour (colour);
+            g.drawText (formatFreq (f), (int) x - 22, (int) y1 + 6, 44, 12,
+                        juce::Justification::centred);
+        }
     }
 
     g.setColour (juce::Colours::grey);
     g.setFont (12.0f);
-    g.drawText ("Blue: locked   Amber: live adaptive notch   Grey: switched off   White outline: manual cut",
+    g.drawText ("Blue: locked   Amber: still searching   Grey: switched off   White outline: manual cut",
                 strip.getX(), strip.getBottom() + 22, strip.getWidth(), 16,
                 juce::Justification::centredLeft);
-    g.drawText ("Drag a fader to cut deeper or shallower   |   Wheel: Q   |   Double-click: on / off",
+    g.drawText ("Hover for frequency   |   Drag a fader to cut deeper   |   Wheel: Q   |   Double-click: on / off",
                 strip.getX(), strip.getBottom() + 40, strip.getWidth(), 16,
                 juce::Justification::centredLeft);
 
-    const bool live = proc.apvts.getRawParameterValue ("mode")->load() > 0.5f;
     const int ps = proc.procState.load();
     const int secs = (int) proc.elapsedSec.load();
 
     juce::String status;
 
-    if (live)
-        status = proc.procState.load() == FeedbackDestroyerAudioProcessor::Running
-                     ? "LIVE  -  one adaptive notch active"
-                     : "LIVE  -  press START to arm protection";
-    else if (ps == FeedbackDestroyerAudioProcessor::Running)
-        status = "PRE-SHOW  -  ringing out  "
+    if (ps == FeedbackDestroyerAudioProcessor::Running)
+        status = "RINGING OUT  -  raise the channel gain as needed   "
                + juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2);
     else if (ps == FeedbackDestroyerAudioProcessor::Done)
-        status = "PRE-SHOW COMPLETE  -  safety notches locked";
+    {
+        switch (proc.endReason.load())
+        {
+            case FeedbackDestroyerAudioProcessor::EndCeiling:      status = "COMPLETE  -  gain ceiling reached, notches locked"; break;
+            case FeedbackDestroyerAudioProcessor::EndOutOfNotches: status = "STOPPED  -  out of notches, gain pulled back, notches locked"; break;
+            case FeedbackDestroyerAudioProcessor::EndTimeLimit:    status = "STOPPED  -  time limit reached, notches locked"; break;
+            case FeedbackDestroyerAudioProcessor::EndStopped:      status = "STOPPED  -  notches locked"; break;
+            default:                                               status = "COMPLETE  -  notches locked"; break;
+        }
+    }
     else
-        status = "PRE-SHOW  -  press START to ring out";
+        status = "Press START to ring out (running again keeps the existing notches)";
 
     g.setColour (juce::Colours::white);
     g.setFont (16.0f);
     g.drawText (status, 56, 395, 650, 22, juce::Justification::centredLeft);
 
+    g.setFont (14.0f);
+    g.setFont (13.0f);
+    g.setColour (juce::Colours::grey);
+    g.drawText ("Low limit", 56, 478, 90, 24, juce::Justification::centredLeft);
+    g.setColour (juce::Colours::white);
     g.setFont (14.0f);
     g.drawText ("Output gain: " + juce::String (proc.gainDbOut.load(), 1) + " dB     Notches: "
                     + juce::String (active) + " / "
@@ -290,6 +290,16 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
                         + juce::String (proc.info[(size_t) selected].q.load(), 1),
                     56, 448, 650, 20, juce::Justification::centredLeft);
     }
+}
+
+void FeedbackDestroyerAudioProcessorEditor::mouseMove (const juce::MouseEvent& e)
+{
+    hovered = strip.expanded (0, 20).contains (e.getPosition()) ? nearestNotch (e.x) : -1;
+}
+
+void FeedbackDestroyerAudioProcessorEditor::mouseExit (const juce::MouseEvent&)
+{
+    hovered = -1;
 }
 
 void FeedbackDestroyerAudioProcessorEditor::mouseDown (const juce::MouseEvent& e)

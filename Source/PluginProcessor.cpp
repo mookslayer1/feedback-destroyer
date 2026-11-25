@@ -3,9 +3,8 @@
 
 namespace
 {
-    constexpr double kQNarrow         = 28.0;   // Pre-Show: narrow, surgical static notch
-    constexpr double kQLiveStart      = 12.0;   // Live: starts reasonably selective
-    constexpr double kQLiveMinimum    = 3.0;    // Live: widened when nearby modes merge
+    constexpr double kQNarrow         = 28.0;   // narrow, surgical static notch
+    constexpr double kQWidest         = 3.0;    // widest a merged notch may become
     constexpr float  kStartDepthDb    = 6.f;    // initial Pre-Show cut
     constexpr float  kDepthStepDb     = 3.f;    // additional cut while a notch is still needed
     constexpr float  kHardMaxDepthDb  = 24.f;   // safety ceiling for an automatically deployed notch
@@ -14,9 +13,9 @@ namespace
     constexpr float  kGainCeilingDb   = 6.f;
     constexpr float  kGainStepDb      = 0.5f;
     constexpr float  kProcessMaxSec   = 180.f;
-    constexpr double kReleaseSec      = 12.0;
     constexpr float  kAttackDbPerSec  = 240.f;
     constexpr float  kReleaseDbPerSec = 12.f;
+    constexpr double kMergeThirdOctave = 0.26;  // ratio of 2^(1/3) - 1
 }
 
 //==============================================================================
@@ -34,8 +33,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout FeedbackDestroyerAudioProces
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
-    layout.add (std::make_unique<juce::AudioParameterChoice> (
-        juce::ParameterID { "mode", 1 }, "Mode", juce::StringArray { "Pre-show", "Live" }, 0));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "lowLimit", 1 }, "Low limit",
+        juce::NormalisableRange<float> (30.f, 400.f, 1.f, 0.5f), 30.f));
 
     return layout;
 }
@@ -69,7 +69,6 @@ void FeedbackDestroyerAudioProcessor::prepareToPlay (double sampleRate, int)
     lastGainLin = juce::Decibels::decibelsToGain (gainDb);
     mainFrames = 0;
     settleFrames = creepFrames = ceilFrames = 0;
-    lastLive = false;
 
     for (auto& n : notches)
     {
@@ -97,26 +96,6 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
 
     handleCommands();
 
-    const bool live = apvts.getRawParameterValue ("mode")->load() > 0.5f;
-
-    if (live != lastLive)
-    {
-        if (live)
-        {
-            if (procState.load() == Running)
-                finishProcess();   // lock the Pre-Show result before entering Live
-        }
-        else
-        {
-            releaseLiveNotch();
-
-            if (procState.load() == Running)
-                procState.store (Idle);
-        }
-
-        lastLive = live;
-    }
-
     const int n   = buffer.getNumSamples();
     const int nch = juce::jmin (buffer.getNumChannels(), 2);
 
@@ -137,23 +116,24 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
         }
     }
 
-    const bool analyse = live || procState.load() == Running;
+    const bool analyse = procState.load() == Running;
 
     if (analyse)
     {
         const float* l = buffer.getReadPointer (0);
         const float* r = nch > 1 ? buffer.getReadPointer (1) : l;
         const double hl = highLimit();
+        const double lim = juce::jlimit (kMinHz, 400.0, (double) apvts.getRawParameterValue ("lowLimit")->load());
 
         for (int s = 0; s < n; ++s)
         {
             const float m = 0.5f * (l[s] + r[s]);
 
-            if (lowA.push (m))
-                runAnalysis (lowA, kMinHz, juce::jmin (400.0, hl), false, live);
+            if (lowA.push (m) && lim < 399.0)
+                runAnalysis (lowA, lim, juce::jmin (400.0, hl), false);
 
             if (mainA.push (m))
-                runAnalysis (mainA, 400.0, hl, true, live);
+                runAnalysis (mainA, juce::jmax (400.0, lim), hl, true);
         }
     }
 
@@ -272,34 +252,69 @@ void FeedbackDestroyerAudioProcessor::updateHeat (const Analyzer& a)
         heatVals[(size_t) b] = juce::jmax (heatVals[(size_t) b] * 0.8f, local[b]);
 }
 
-void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain, bool live)
+int FeedbackDestroyerAudioProcessor::freeSlotCount() const
+{
+    int c = 0;
+    for (const auto& n : notches)
+        if (n.state == Free)
+            ++c;
+    return c;
+}
+
+// Folds a new frequency into the nearest unpinned notch (within maxRatio) by moving that notch to the
+// geometric centre and widening it so both frequencies sit inside it. Frees a slot for something else.
+bool FeedbackDestroyerAudioProcessor::mergeIntoExisting (double f, double maxRatio)
+{
+    int best = -1;
+    double bestRatio = maxRatio;
+
+    for (int i = 0; i < kSlots; ++i)
+    {
+        const auto& n = notches[(size_t) i];
+
+        if (n.state == Free || n.releasing || n.pinned || ! info[(size_t) i].engaged.load())
+            continue;
+
+        const double ratio = juce::jmax (f / n.freq, n.freq / f) - 1.0;
+
+        if (ratio < bestRatio)
+        {
+            bestRatio = ratio;
+            best = i;
+        }
+    }
+
+    if (best < 0)
+        return false;
+
+    auto& n = notches[(size_t) best];
+    const double centre = std::sqrt (n.freq * f);
+    const double reqQ = centre / (std::abs (f - n.freq) * 1.6 + centre * 0.02);
+
+    n.freq = centre;
+    n.q = juce::jmin (n.q, juce::jlimit (kQWidest, kQNarrow, reqQ));
+    n.target = juce::jmax (n.target, kStartDepthDb);
+    n.sinceNeeded = 0;
+    settleFrames = 35;
+    return true;
+}
+
+void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain)
 {
     Candidate cands[8];
     const int n = a.analyse (sr, lowHz, highHz, kPromThr, 1.0, cands, 8);
 
     updateHeat (a);
 
-    const bool acting = live || procState.load() == Running;
-
-    if (acting && n > 0)
-        handleCandidates (cands, n, live);
+    if (n > 0)
+        handleCandidates (cands, n);
 
     if (isMain)
-        housekeeping (live);
+        housekeeping();
 }
 
-void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, int numCands, bool live)
+void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, int numCands)
 {
-    if (live)
-    {
-        if (numCands > 0)
-            handleLiveCandidate (cands[0]);
-
-        return;
-    }
-
-    const bool running = procState.load() == Running;
-
     struct Target { double f; double q; };
     Target tg[3];
     int nt = 0;
@@ -330,13 +345,9 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
                 continue;
 
             n.sinceNeeded = 0;
+            settleFrames = 35;
 
-            if (running)
-                settleFrames = 35;
-
-            const bool canDeepen = ! n.pinned && (n.state == Floating || running);
-
-            if (canDeepen && (int) (mainFrames - n.lastDeepen) > 8
+            if (! n.pinned && (int) (mainFrames - n.lastDeepen) > 8
                 && n.target + kDepthStepDb <= kHardMaxDepthDb + 0.01f)
             {
                 n.target += kDepthStepDb;
@@ -345,6 +356,13 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
 
             continue;
         }
+
+        // As the bank fills, close neighbours are folded into one wider notch to keep slots spare.
+        const int freeSlots = freeSlotCount();
+        const double mergeRatio = freeSlots > 24 ? 0.06 : (freeSlots > 12 ? 0.12 : kMergeThirdOctave);
+
+        if (mergeIntoExisting (f, mergeRatio))
+            continue;
 
         bool merged = false;
 
@@ -380,6 +398,9 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
 
         if (slot < 0)
         {
+            if (mergeIntoExisting (tg[t].f, kMergeThirdOctave))
+                continue;
+
             gainDb = juce::jmax (-6.f, gainDb - 3.f);
             settleFrames = 60;
             fullFlag = true;
@@ -400,73 +421,22 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
         ++newCount;
     }
 
-    if (newCount > 0 && running)
+    if (newCount > 0)
     {
         gainDb = juce::jmax (0.f, gainDb - (newCount >= 2 ? 2.f : 1.f));
         settleFrames = 35;
     }
 }
 
-void FeedbackDestroyerAudioProcessor::handleLiveCandidate (const Candidate& cand)
-{
-    auto& n = notches[0];
-
-    if (n.state == Free || n.releasing)
-    {
-        n = Notch();
-        n.state = Floating;
-        n.freq = cand.freq;
-        n.q = kQLiveStart;
-        n.target = kStartDepthDb;
-        n.lastDeepen = (int) mainFrames;
-
-        info[0].manualDepth.store (0.f);
-        info[0].manualQ.store (0.f);
-        info[0].engaged.store (true);
-        return;
-    }
-
-    if (! info[0].engaged.load())
-        return;
-
-    n.sinceNeeded = 0;
-
-    const double ratio = std::abs (cand.freq / n.freq - 1.0);
-
-    if (ratio < 0.12)
-    {
-        const double oldFreq = n.freq;
-        const double centre = std::sqrt (oldFreq * cand.freq);
-        const double requiredQ = centre / (std::abs (cand.freq - oldFreq) * 1.6 + centre * 0.02);
-
-        n.freq = centre;
-        n.q = juce::jlimit (kQLiveMinimum, kQLiveStart, requiredQ);
-    }
-
-    if ((int) (mainFrames - n.lastDeepen) > 8 && n.target + kDepthStepDb <= kHardMaxDepthDb + 0.01f)
-    {
-        n.target += kDepthStepDb;
-        n.lastDeepen = (int) mainFrames;
-    }
-}
-
-void FeedbackDestroyerAudioProcessor::housekeeping (bool live)
+void FeedbackDestroyerAudioProcessor::housekeeping()
 {
     ++mainFrames;
 
     const double hopSec = (double) mainA.hop / sr;
-    const int releaseFrames = (int) (kReleaseSec / hopSec);
 
     for (auto& n : notches)
-    {
-        if (n.state == Free)
-            continue;
-
-        ++n.sinceNeeded;
-
-        if (live && n.state == Floating && ! n.pinned && ! n.releasing && n.sinceNeeded >= releaseFrames)
-            n.releasing = true;
-    }
+        if (n.state != Free)
+            ++n.sinceNeeded;
 
     if (procState.load() != Running)
         return;
@@ -491,12 +461,14 @@ void FeedbackDestroyerAudioProcessor::housekeeping (bool live)
     }
     else if (++ceilFrames >= (int) (3.0 / hopSec))
     {
-        finishProcess();
+        finishProcess (EndCeiling);
         return;
     }
 
-    if (fullFlag || elapsed >= kProcessMaxSec)
-        finishProcess();
+    if (fullFlag)
+        finishProcess (EndOutOfNotches);
+    else if (elapsed >= kProcessMaxSec)
+        finishProcess (EndTimeLimit);
 }
 
 //==============================================================================
@@ -509,11 +481,12 @@ void FeedbackDestroyerAudioProcessor::startProcess()
     elapsed = 0.f;
     settleFrames = creepFrames = ceilFrames = 0;
     fullFlag = false;
+    endReason.store (EndNone);
     lowA.clearTracking();
     mainA.clearTracking();
 }
 
-void FeedbackDestroyerAudioProcessor::finishProcess()
+void FeedbackDestroyerAudioProcessor::finishProcess (int reason)
 {
     for (auto& n : notches)
     {
@@ -532,6 +505,7 @@ void FeedbackDestroyerAudioProcessor::finishProcess()
         n.releasing = false;
     }
 
+    endReason.store (reason);
     procState.store (Done);
     creepFrames = ceilFrames = settleFrames = 0;
 }
@@ -548,14 +522,6 @@ void FeedbackDestroyerAudioProcessor::lockAll()
     }
 }
 
-void FeedbackDestroyerAudioProcessor::releaseLiveNotch()
-{
-    auto& n = notches[0];
-
-    if (n.state == Floating && ! n.pinned && ! n.releasing)
-        n.releasing = true;
-}
-
 void FeedbackDestroyerAudioProcessor::resetAll()
 {
     for (int i = 0; i < kSlots; ++i)
@@ -570,7 +536,7 @@ void FeedbackDestroyerAudioProcessor::resetAll()
     elapsed = 0.f;
     settleFrames = creepFrames = ceilFrames = 0;
     fullFlag = false;
-    lastLive = false;
+    endReason.store (EndNone);
     procState.store (Idle);
     lowA.clearTracking();
     mainA.clearTracking();
@@ -579,8 +545,6 @@ void FeedbackDestroyerAudioProcessor::resetAll()
 void FeedbackDestroyerAudioProcessor::handleCommands()
 {
     const int cmd = uiCommand.exchange (CmdNone);
-    const bool live = apvts.getRawParameterValue ("mode")->load() > 0.5f;
-
     switch (cmd)
     {
         case CmdReset:
@@ -592,10 +556,8 @@ void FeedbackDestroyerAudioProcessor::handleCommands()
             break;
 
         case CmdStop:
-            if (live)
-                releaseLiveNotch();
-            else if (procState.load() == Running)
-                finishProcess();
+            if (procState.load() == Running)
+                finishProcess (EndStopped);
             break;
 
         case CmdLockAll:
