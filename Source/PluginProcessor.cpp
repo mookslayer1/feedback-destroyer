@@ -12,7 +12,7 @@ namespace
     constexpr float  kPromThr         = 18.f;   // fixed internal detection prominence
     constexpr float  kGainCeilingDb   = 6.f;
     constexpr float  kGainStepDb      = 0.5f;
-    constexpr float  kProcessMaxSec   = 180.f;
+    constexpr float  kProcessMaxSec   = 600.f;   // backstop only; a run normally ends when quiet at the gain ceiling
     constexpr float  kAttackDbPerSec  = 240.f;
     constexpr float  kReleaseDbPerSec = 12.f;
     constexpr double kMergeThirdOctave = 0.26;  // ratio of 2^(1/3) - 1
@@ -482,12 +482,80 @@ void FeedbackDestroyerAudioProcessor::startProcess()
     settleFrames = creepFrames = ceilFrames = 0;
     fullFlag = false;
     endReason.store (EndNone);
+    tidiedAtEnd.store (0);
     lowA.clearTracking();
     mainA.clearTracking();
 }
 
+// Merges pairs of unpinned notches whose bands touch or nearly touch into one wider notch, freeing slots.
+int FeedbackDestroyerAudioProcessor::tidyOverlaps()
+{
+    int merges = 0;
+
+    for (int pass = 0; pass < kSlots; ++pass)
+    {
+        int bi = -1, bj = -1;
+        double bestGap = 1e9;
+
+        for (int i = 0; i < kSlots; ++i)
+        {
+            const auto& a = notches[(size_t) i];
+
+            if (a.state == Free || a.releasing || a.pinned || ! info[(size_t) i].engaged.load())
+                continue;
+
+            for (int j = i + 1; j < kSlots; ++j)
+            {
+                const auto& b = notches[(size_t) j];
+
+                if (b.state == Free || b.releasing || b.pinned || ! info[(size_t) j].engaged.load())
+                    continue;
+
+                const double ha = a.freq / (2.0 * a.q), hb = b.freq / (2.0 * b.q);
+                const double d = std::abs (a.freq - b.freq);
+                const double gap = d / (ha + hb);
+
+                if (gap < 1.25 && gap < bestGap)
+                {
+                    bestGap = gap;
+                    bi = i;
+                    bj = j;
+                }
+            }
+        }
+
+        if (bi < 0)
+            break;
+
+        auto& a = notches[(size_t) bi];
+        const auto& b = notches[(size_t) bj];
+
+        const double lo = juce::jmin (a.freq - a.freq / (2.0 * a.q), b.freq - b.freq / (2.0 * b.q));
+        const double hi = juce::jmax (a.freq + a.freq / (2.0 * a.q), b.freq + b.freq / (2.0 * b.q));
+        const double centre = std::sqrt (a.freq * b.freq);
+
+        a.freq = centre;
+        a.q = juce::jlimit (kQWidest, kQNarrow, centre / juce::jmax (1.0, hi - lo));
+        a.target = juce::jmax (a.target, b.target);
+        a.cur = juce::jmax (a.cur, b.cur);
+        a.secured = a.secured && b.secured;
+        if (b.state == Floating)
+            a.state = a.state == Latched ? Latched : Floating;
+
+        notches[(size_t) bj] = Notch();
+        info[(size_t) bj].engaged.store (true);
+        info[(size_t) bj].manualDepth.store (0.f);
+        info[(size_t) bj].manualQ.store (0.f);
+        ++merges;
+    }
+
+    return merges;
+}
+
 void FeedbackDestroyerAudioProcessor::finishProcess (int reason)
 {
+    tidiedAtEnd.store (tidyOverlaps());
+
     for (auto& n : notches)
     {
         if (n.state == Free)
@@ -537,6 +605,7 @@ void FeedbackDestroyerAudioProcessor::resetAll()
     settleFrames = creepFrames = ceilFrames = 0;
     fullFlag = false;
     endReason.store (EndNone);
+    tidiedAtEnd.store (0);
     procState.store (Idle);
     lowA.clearTracking();
     mainA.clearTracking();

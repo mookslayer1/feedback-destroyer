@@ -40,7 +40,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "Freqd Out v4.0"; }
+    const juce::String getName() const override { return "Freqd Out v4.1"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -64,6 +64,7 @@ public:
     std::atomic<float> elapsedSec { 0.f };
     std::atomic<float> highLimitHz { 20000.f };
     std::atomic<int>   endReason { EndNone };
+    std::atomic<int>   tidiedAtEnd { 0 };   // overlapping notches merged when the last run ended
 
 private:
     struct Notch
@@ -97,6 +98,7 @@ private:
     void startProcess();
     void finishProcess (int reason);
     void lockAll();
+    int  tidyOverlaps();
     void applyRestore();
     void applyManual();
     void updateFilters (int numSamples);

@@ -121,7 +121,7 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (juce::Colours::white);
     g.setFont (20.0f);
-    g.drawText ("Freqd Out v4.0", 20, 14, 300, 28, juce::Justification::centredLeft);
+    g.drawText ("Freqd Out v4.1", 20, 14, 300, 28, juce::Justification::centredLeft);
 
     g.setColour (kStripFill);
     g.fillRect (heatStrip);
@@ -209,8 +209,23 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
         const float y0 = yForDb (0.f);
         const float y1 = yForDb (cut);
 
+        // Width band: how much of the spectrum this notch covers (f +/- f/2Q on the log axis).
+        const double q = juce::jmax (1.0, (double) proc.info[(size_t) i].q.load());
+        const float xl = xForFreq (f * (1.0 - 0.5 / q));
+        const float xr = xForFreq (f * (1.0 + 0.5 / q));
+        const float bandW = juce::jmax (6.f, xr - xl);
+
+        g.setColour (colour.withAlpha (0.14f));
+        g.fillRect (x - bandW * 0.5f, y0, bandW, juce::jmax (1.f, y1 - y0));
+
         g.setColour (colour.withAlpha (0.35f));
         g.fillRect (x - 3.f, y0, 6.f, juce::jmax (1.f, y1 - y0));
+
+        if (bandW > 10.f)
+        {
+            g.setColour (colour.withAlpha (0.8f));
+            g.fillRect (x - bandW * 0.5f, y1 - 1.f, bandW, 2.f);
+        }
 
         g.setColour (colour);
         g.fillRoundedRectangle (x - 8.f, y1 - 3.f, 16.f, 7.f, 2.f);
@@ -238,7 +253,7 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (juce::Colours::grey);
     g.setFont (12.0f);
-    g.drawText ("Blue: locked   Amber: still searching   Grey: switched off   White outline: manual cut",
+    g.drawText ("Blue: locked   Amber: searching   Grey: off   White outline: manual cut   Shaded: notch width",
                 strip.getX(), strip.getBottom() + 22, strip.getWidth(), 16,
                 juce::Justification::centredLeft);
     g.drawText ("Hover for frequency   |   Drag a fader to cut deeper   |   Wheel: Q   |   Double-click: on / off",
@@ -263,6 +278,9 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
             case FeedbackDestroyerAudioProcessor::EndStopped:      status = "STOPPED  -  notches locked"; break;
             default:                                               status = "COMPLETE  -  notches locked"; break;
         }
+
+        if (proc.tidiedAtEnd.load() > 0)
+            status += "  (" + juce::String (proc.tidiedAtEnd.load()) + " overlapping merged)";
     }
     else
         status = "Press START to ring out (running again keeps the existing notches)";
