@@ -9,7 +9,7 @@
 class FeedbackDestroyerAudioProcessor : public juce::AudioProcessor
 {
 public:
-    static constexpr int kSlots = 24;        // 24 notches; any of them can float or be locked
+    static constexpr int kSlots = 24;        // Pre-Show notch bank
     static constexpr int kHeatBins = 64;     // resolution of the heat strip
     static constexpr double kMinHz = 30.0;
     static constexpr double kMaxHz = 40000.0;
@@ -18,15 +18,14 @@ public:
     enum ProcState { Idle = 0, Running = 1, Done = 2 };
     enum Command { CmdNone = 0, CmdReset = 1, CmdStart = 2, CmdStop = 3, CmdLockAll = 4 };
 
-    // What the editor is allowed to look at or change.
     struct SlotInfo
     {
         std::atomic<int>   state { 0 };
-        std::atomic<float> freq { 0.f }, depth { 0.f }, q { 28.f };   // written by the audio thread
-        std::atomic<bool>  manual { false };                          // pinned by a manual cut
-        std::atomic<bool>  engaged { true };                          // switched on or off from the editor
-        std::atomic<float> manualDepth { 0.f };                       // set from the editor (0 = none)
-        std::atomic<float> manualQ { 0.f };                           // set from the editor (0 = none)
+        std::atomic<float> freq { 0.f }, depth { 0.f }, q { 28.f };
+        std::atomic<bool>  manual { false };
+        std::atomic<bool>  engaged { true };
+        std::atomic<float> manualDepth { 0.f };
+        std::atomic<float> manualQ { 0.f };
     };
 
     FeedbackDestroyerAudioProcessor();
@@ -55,10 +54,9 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
-    // Shared with the editor
     juce::AudioProcessorValueTreeState apvts;
     std::array<SlotInfo, kSlots> info;
-    std::array<std::atomic<float>, kHeatBins> heat;   // how feedback-like each part of the spectrum looks (dB)
+    std::array<std::atomic<float>, kHeatBins> heat;
     std::atomic<int>   uiCommand { 0 };
     std::atomic<int>   procState { Idle };
     std::atomic<float> gainDbOut { 0.f };
@@ -71,13 +69,13 @@ private:
         int    state = Free;
         double freq = 0.0;
         double q = 28.0;
-        float  cur = 0.f;          // depth being applied right now (dB)
-        float  target = 0.f;       // depth we want (dB)
+        float  cur = 0.f;
+        float  target = 0.f;
         int    sinceNeeded = 0;
         int    lastDeepen = 0;
         bool   releasing = false;
-        bool   pinned = false;     // a manual cut: never changed automatically
-        bool   secured = false;    // has had its extra safety cut
+        bool   pinned = false;
+        bool   secured = false;
         double coefFreq = 0.0, coefQ = 0.0;
         float  coefDepth = -1.f;
         Biquad bq[2];
@@ -97,17 +95,17 @@ private:
     void startProcess();
     void finishProcess();
     void lockAll();
+    void releaseLiveNotch();
     void applyRestore();
     void applyManual();
-    void updateFilters (int numSamples, float maxDepth);
+    void updateFilters (int numSamples);
     void runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain, bool live);
     void handleCandidates (const Candidate* cands, int numCands, bool live);
+    void handleLiveCandidate (const Candidate& cand);
     void housekeeping (bool live);
     void updateHeat (const Analyzer& a);
     int  findCovering (double freq) const;
     void publishInfo();
-    float currentMaxDepth() const;
-    float currentPromThr() const;
     double highLimit() const;
 
     std::array<Notch, kSlots> notches;
@@ -122,6 +120,7 @@ private:
     float elapsed = 0.f;
     int settleFrames = 0, creepFrames = 0, ceilFrames = 0;
     bool fullFlag = false;
+    bool lastLive = false;
 
     Saved savedPending;
     juce::SpinLock restoreLock;
