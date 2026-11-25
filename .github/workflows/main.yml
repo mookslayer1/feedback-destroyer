@@ -1,4 +1,4 @@
-name: Build Freq'd Out (macOS)
+name: Build Freqd Out v4.0 (macOS)
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          bundle="build/FeedbackDestroyer_artefacts/Release/VST3/Freq'd Out.vst3"
+          bundle="build/FeedbackDestroyer_artefacts/Release/VST3/Freqd Out v4.0.vst3"
 
           if [[ ! -d "$bundle" ]]; then
             echo "Expected VST3 bundle not found: $bundle"
@@ -34,16 +34,16 @@ jobs:
           codesign --force --deep --sign - "$bundle"
 
           mkdir -p pkgroot/Library/Audio/Plug-Ins/VST3
-          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freq'd Out.vst3"
+          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out v4.0.vst3"
 
           pkgbuild --root pkgroot \
             --identifier com.sjamaudio.freqdout.vst3 \
-            --version 0.1.0 \
+            --version 4.0.0 \
             --install-location / \
-            "dist/FreqdOut-VST3-macOS.pkg"
+            "dist/FreqdOut-v4.0-VST3-macOS.pkg"
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: FreqdOut-VST3-macOS-installer
-          path: dist/FreqdOut-VST3-macOS.pkg
+          name: FreqdOut-v4.0-VST3-macOS-installer
+          path: dist/FreqdOut-v4.0-VST3-macOS.pkg
