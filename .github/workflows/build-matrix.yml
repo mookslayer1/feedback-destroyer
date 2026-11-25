@@ -1,0 +1,86 @@
+# Cross-platform build scaffold for Freqd Out. SCAFFOLD: written but not yet run.
+# Manual only (Actions tab -> "Build all platforms" -> Run workflow). It never runs on push,
+# so it cannot interfere with main.yml, which stays the official macOS VST3 installer build.
+name: Build all platforms
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (VST3 + AU + Standalone)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFD_BUILD_AU=ON -DFD_BUILD_STANDALONE=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Sign and zip
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find build/FeedbackDestroyer_artefacts/Release \( -name "*.vst3" -o -name "*.component" -o -name "*.app" \) -maxdepth 2 | while read -r b; do
+            codesign --force --deep --sign - "$b"
+            ditto -c -k --keepParent "$b" "dist/$(basename "$b").zip"
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreqdOut-macOS-all-formats
+          path: dist/*.zip
+
+  windows:
+    name: Windows (VST3 + Standalone)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DFD_BUILD_STANDALONE=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "build/FeedbackDestroyer_artefacts/Release/VST3/*","build/FeedbackDestroyer_artefacts/Release/Standalone/*" -DestinationPath dist/FreqdOut-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreqdOut-Windows
+          path: dist/FreqdOut-Windows.zip
+
+  linux:
+    name: Linux (VST3 + Standalone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev \
+            libfreetype-dev libfontconfig1-dev libx11-dev libxcomposite-dev libxcursor-dev \
+            libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libgl1-mesa-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFD_BUILD_STANDALONE=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Zip
+        run: |
+          mkdir -p dist
+          cd build/FeedbackDestroyer_artefacts/Release
+          zip -r ../../../dist/FreqdOut-Linux.zip VST3 Standalone
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreqdOut-Linux
+          path: dist/FreqdOut-Linux.zip
+
+  ios:
+    name: iOS (AUv3 + Standalone, unsigned)
+    runs-on: macos-15
+    continue-on-error: true   # experimental: the editor is not touch-ready yet (see docs/ROADMAP.md)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-ios -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DFD_BUILD_AUV3=ON -DFD_BUILD_STANDALONE=ON
+      - name: Build (no code signing)
+        run: cmake --build build-ios --config Release -- -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO

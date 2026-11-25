@@ -1,23 +1,23 @@
-# Freq’d Out
+# Freqd Out
 
-A live feedback-suppression plugin for use in Waves SuperRack and other plugin hosts.
+A feedback-suppression plugin by SJAM Audio, for use in Waves SuperRack and other plugin hosts.
 
-## Modes
+## How it works
 
-- **Pre-Show:** Rings out the system, deploys narrow static safety notches, then locks them with an additional 6 dB failsafe cut.
-- **Live:** Uses one intelligent adaptive notch to protect against unexpected feedback during the show.
+One process, run and set:
 
-## Controls
+1. Set the **Low limit** to your channel's high-pass frequency (30–400 Hz).
+2. Press **START**. Raise the channel gain gradually while the plugin rings out the system, finds feedback frequencies and places notches (up to 48).
+3. The run ends by itself (gain ceiling reached, out of notches, or time limit) or when you press **STOP**. The status line says which. All notches are then locked with an extra safety cut.
+4. Press **START** again at any time to add notches; existing notches are kept.
 
-- **START / STOP** — starts or stops the selected mode.
-- **PRE-SHOW / LIVE** — selects the operating mode.
-- **Frequency display** — drag a notch to change depth; use the mouse wheel for Q; double-click to enable or disable it.
+Close frequencies are merged into one wider notch as the bank fills. Drag a notch to cut deeper (24 dB max), use the mouse wheel for Q, double-click to switch a notch on or off. Hover over a notch to see its frequency.
 
-## Live-use workflow
+## Repository
 
-1. Set a safe starting gain.
-2. Select **PRE-SHOW** and press **START**.
-3. Gradually raise gain until feedback modes are identified and notched.
-4. Stop the process to lock the safety EQ.
-5. Select **LIVE** and press **START** before the performance.
-6. Use **STOP** during Live to release the adaptive notch.
+- `Source/` the plugin (JUCE 8)
+- `CMakeLists.txt` build; VST3 by default, other formats opt-in (see the comments in the file)
+- `.github/workflows/main.yml` official macOS VST3 installer build
+- `.github/workflows/build-matrix.yml` manual cross-platform build scaffold
+- `docs/` roadmap, architecture and the desk-recipe format
+- `core/`, `hardware/` placeholders for the JUCE-free DSP library and the pedal
