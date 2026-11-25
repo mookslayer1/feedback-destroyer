@@ -564,7 +564,7 @@ void FeedbackDestroyerAudioProcessor::startProcess()
         return;
 
     stageMode = juce::jlimit (0, 2, (int) apvts.getRawParameterValue ("mode")->load());
-    listenSec = stageMode == 0 ? 10.f : (stageMode == 1 ? 30.f : 60.f);
+    listenSec = 5.f;                    // a short, fixed listen at the start of every run
     verifyOn = stageMode != 0;
     verifyHoldSec = stageMode == 2 ? 8.f : 5.f;
     verifyMaxExtraDb = stageMode == 2 ? 9.f : 6.f;
