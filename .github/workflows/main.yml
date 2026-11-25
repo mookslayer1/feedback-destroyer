@@ -1,4 +1,6 @@
 name: Build Freqd Out v4.1 (macOS)
+# Runs on the Intel macOS runner because the Apple Silicon runners have been short on capacity.
+# The plugin is still a universal binary (arm64 + x86_64). The arm64 runner version is pinned in build-macos-arm64.yml.
 
 on:
   push:
@@ -7,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     steps:
       - name: Get the code
         uses: actions/checkout@v4

@@ -1,0 +1,48 @@
+# PINNED: the Apple Silicon (arm64) runner build. Manual only. Use it if the Intel runner ever causes trouble.
+name: Build Freqd Out v4.1 (macOS, Apple Silicon runner)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Sign and package the VST3
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          bundle="build/FeedbackDestroyer_artefacts/Release/VST3/Freqd Out v4.1.vst3"
+
+          if [[ ! -d "$bundle" ]]; then
+            echo "Expected VST3 bundle not found: $bundle"
+            find build -type d -name '*.vst3' -print
+            exit 1
+          fi
+
+          codesign --force --deep --sign - "$bundle"
+
+          mkdir -p pkgroot/Library/Audio/Plug-Ins/VST3
+          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out v4.1.vst3"
+
+          pkgbuild --root pkgroot \
+            --identifier com.sjamaudio.freqdout.vst3 \
+            --version 4.1.0 \
+            --install-location / \
+            "dist/FreqdOut-v4.1-VST3-macOS.pkg"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreqdOut-v4.1-VST3-macOS-installer
+          path: dist/FreqdOut-v4.1-VST3-macOS.pkg
