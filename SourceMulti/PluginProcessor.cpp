@@ -10,6 +10,7 @@ namespace
     constexpr float  kHardMaxDepthDb  = 24.f;   // absolute ceiling (manual faders); automatic cuts use the Max cut control
     constexpr float  kWatchBonusDb    = 6.f;    // extra sensitivity inside bands the burst flagged
     constexpr float  kBurstMaxDb      = -20.f;  // loudest the burst may auto-raise to
+    constexpr float  kFastPromThr     = 14.f;   // the fast detector also needs growth, so it can be more sensitive
     constexpr float  kPromThr         = 18.f;   // fixed internal detection prominence
     constexpr int    kMaxVerifyCycles = 4;      // verify -> ring-out repeats before giving up
     constexpr float  kGainStepDb      = 0.5f;
@@ -85,6 +86,8 @@ void FeedbackDestroyerAudioProcessor::prepareToPlay (double sampleRate, int)
 
     lowA.prepare (15, 8192);
     mainA.prepare (13, 2048);
+    fastA.prepare (11, 256, 4);
+    clockSamples = 0;
     wBase.prepare (13);
     wIn.prepare (13);
     wNoise.prepare (13);
@@ -121,7 +124,7 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     for (int i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    if (! mainA.isReady() || ! lowA.isReady() || buffer.getNumChannels() == 0 || buffer.getNumSamples() == 0)
+    if (! mainA.isReady() || ! lowA.isReady() || ! fastA.isReady() || buffer.getNumChannels() == 0 || buffer.getNumSamples() == 0)
         return;
 
     handleCommands();
@@ -147,6 +150,7 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
         }
     }
 
+    clockSamples += n;
     const int stage = procState.load();
     const bool analyse = stage == Running || stage == Listening || stage == Verifying;
 
@@ -169,6 +173,9 @@ void FeedbackDestroyerAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
 
             if (mainA.push (m))
                 runAnalysis (mainA, juce::jmax (400.0, lim), hl, true);
+
+            if (fastA.push (m))
+                runAnalysis (fastA, juce::jmax (500.0, lim), hl, false, true);
         }
     }
 
@@ -337,7 +344,7 @@ bool FeedbackDestroyerAudioProcessor::mergeIntoExisting (double f, double maxRat
     return true;
 }
 
-void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain)
+void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain, bool isFast)
 {
     Candidate cands[8];
     const int st = procState.load();
@@ -346,7 +353,10 @@ void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, do
     {
         // Listening only: learn what the room does on its own, never act on it.
         a.analyse (sr, lowHz, highHz, 999.f, 1.0, cands, 8);
-        updateHeat (a);
+
+        if (! isFast)
+            updateHeat (a);
+
         a.accumulateBaseline();
 
         if (isMain)
@@ -355,13 +365,14 @@ void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, do
         return;
     }
 
-    const int n = a.analyse (sr, lowHz, highHz, kPromThr, 1.0, cands, 8);
+    const int n = a.analyse (sr, lowHz, highHz, isFast ? kFastPromThr : kPromThr, 1.0, cands, 8);
 
-    updateHeat (a);
+    if (! isFast)
+        updateHeat (a);
 
     if (n > 0)
     {
-        handleCandidates (cands, n);
+        handleCandidates (cands, n, isFast);
 
         if (st == Verifying)
         {
@@ -376,7 +387,7 @@ void FeedbackDestroyerAudioProcessor::runAnalysis (Analyzer& a, double lowHz, do
         housekeeping();
 }
 
-void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, int numCands)
+void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, int numCands, bool fast)
 {
     struct Target { double f; double q; };
     Target tg[3];
@@ -410,12 +421,16 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
             n.sinceNeeded = 0;
             settleFrames = 35;
 
-            if (! n.pinned && (int) (mainFrames - n.lastDeepen) > 8)
+            // The long-window analysers know the frequency more precisely than the fast one: pull a fresh notch onto it.
+            if (! fast && n.state == Floating && ! n.pinned && n.q >= 20.0 && std::abs (f / n.freq - 1.0) < 0.02)
+                n.freq = f;
+
+            if (! n.pinned && (clockSamples - n.lastDeepenClk) > (long) (0.08 * sr))
             {
                 if (n.target + kDepthStepDb <= depthLimit (n) + 0.01f)
                 {
                     n.target += kDepthStepDb;
-                    n.lastDeepen = (int) mainFrames;
+                    n.lastDeepenClk = clockSamples;
                 }
                 else
                 {
@@ -423,7 +438,7 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
                     gainDb = juce::jmax (0.f, gainDb - 1.f);
                     ceilingDb = juce::jmin (ceilingDb, gainDb);
                     limitedByCut.store (true);
-                    n.lastDeepen = (int) mainFrames;
+                    n.lastDeepenClk = clockSamples;
                 }
             }
 
@@ -485,8 +500,9 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
         n.state = Floating;
         n.freq = tg[t].f;
         n.q = tg[t].q;
-        n.target = kStartDepthDb;
+        n.target = fast ? kStartDepthDb + 3.f : kStartDepthDb;   // quick detections start deeper
         n.lastDeepen = (int) mainFrames;
+        n.lastDeepenClk = clockSamples;
 
         info[(size_t) slot].manualDepth.store (0.f);
         info[(size_t) slot].manualQ.store (0.f);
@@ -616,10 +632,13 @@ void FeedbackDestroyerAudioProcessor::beginListen()
 {
     lowA.clearBaseline();
     mainA.clearBaseline();
+    fastA.clearBaseline();
     lowA.clearWatch();
     mainA.clearWatch();
+    fastA.clearWatch();
     lowA.clearTracking();
     mainA.clearTracking();
+    fastA.clearTracking();
     wBase.reset();
     stageTime = 0.f;
     stageProgress.store (0.f);
@@ -656,6 +675,7 @@ void FeedbackDestroyerAudioProcessor::clearMaps()
 void FeedbackDestroyerAudioProcessor::finishListen()
 {
     const int tones = lowA.finishBaseline() + mainA.finishBaseline();
+    fastA.finishBaseline();
     toneCount.store (tones);
 
     roomVals.fill (0.f);
@@ -855,6 +875,7 @@ bool FeedbackDestroyerAudioProcessor::buildSuspectMap()
 
     lowA.clearWatch();
     mainA.clearWatch();
+    fastA.clearWatch();
     suspectVals.fill (0.f);
 
     for (int i = 0; i < np; ++i)
@@ -862,6 +883,7 @@ bool FeedbackDestroyerAudioProcessor::buildSuspectMap()
         const double fc = lo * std::pow (2.0, (picked[i] + 0.5) / 12.0);
         lowA.addWatch (sr, fc, 1.0 / 6.0, kWatchBonusDb);
         mainA.addWatch (sr, fc, 1.0 / 6.0, kWatchBonusDb);
+        fastA.addWatch (sr, fc, 1.0 / 6.0, kWatchBonusDb);
 
         const float strength = juce::jlimit (0.2f, 1.f, 1.f - (M - bandL[(size_t) picked[i]]) / 16.f);
         const int hb = heatBinFor (fc);
@@ -895,6 +917,7 @@ void FeedbackDestroyerAudioProcessor::beginRingOut()
     fullFlag = false;
     lowA.clearTracking();
     mainA.clearTracking();
+    fastA.clearTracking();
     stageProgress.store (0.f);
     procState.store (Running);
 }
@@ -908,6 +931,7 @@ void FeedbackDestroyerAudioProcessor::beginVerify()
     stageProgress.store (0.f);
     lowA.clearTracking();
     mainA.clearTracking();
+    fastA.clearTracking();
     procState.store (Verifying);
 }
 
@@ -1059,8 +1083,11 @@ void FeedbackDestroyerAudioProcessor::resetAll()
     mainA.clearTracking();
     lowA.clearBaseline();
     mainA.clearBaseline();
+    fastA.clearBaseline();
     lowA.clearWatch();
     mainA.clearWatch();
+    fastA.clearWatch();
+    fastA.clearTracking();
     clearMaps();
     verifyResult.store (0);
     verifiedExtraDb.store (0.f);

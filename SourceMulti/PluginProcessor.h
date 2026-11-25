@@ -90,6 +90,7 @@ private:
         float  target = 0.f;
         int    sinceNeeded = 0;
         int    lastDeepen = 0;
+        long   lastDeepenClk = 0;
         bool   releasing = false;
         bool   pinned = false;
         bool   secured = false;
@@ -130,8 +131,8 @@ private:
     void applyRestore();
     void applyManual();
     void updateFilters (int numSamples);
-    void runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain);
-    void handleCandidates (const Candidate* cands, int numCands);
+    void runAnalysis (Analyzer& a, double lowHz, double highHz, bool isMain, bool isFast = false);
+    void handleCandidates (const Candidate* cands, int numCands, bool fast = false);
     bool mergeIntoExisting (double freq, double maxRatio);
     int  freeSlotCount() const;
     void housekeeping();
@@ -142,7 +143,8 @@ private:
 
     std::array<Notch, kSlots> notches;
 
-    Analyzer lowA, mainA;
+    Analyzer lowA, mainA, fastA;   // fastA: short window, reports in about 5 ms steps for quick reaction above 500 Hz
+    long clockSamples = 0;
     std::array<float, kHeatBins> heatVals {};
 
     double sr = 48000.0;

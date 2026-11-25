@@ -18,8 +18,10 @@ struct Candidate
 class Analyzer
 {
 public:
-    void prepare (int fftOrder, int hopSize)
+    void prepare (int fftOrder, int hopSize, int histStride = 1)
     {
+        stride = juce::jmax (1, histStride);
+        histCount = 0;
         size = 1 << fftOrder;
         hop = hopSize;
         fft = std::make_unique<juce::dsp::FFT> (fftOrder);
@@ -97,7 +99,7 @@ public:
         lastLo = kLo;
         lastHi = kHi;
 
-        const size_t oldSlot = (size_t) ((frame + 1) % 4);   // the frame from 3 frames ago
+        const size_t oldSlot = (size_t) ((histCount + 1) % 4);   // the snapshot from 3 snapshots ago
         const int steadyFrames = juce::jmax (4, (int) std::ceil (steadySec * sr / hop));
         int n = 0;
 
@@ -164,8 +166,12 @@ public:
 
         persist.swap (persistNew);
 
-        std::copy (level.begin(), level.end(), hist.begin() + (size_t) (frame % 4) * (size_t) (half + 1));
-        histFilled = juce::jmin (histFilled + 1, 4);
+        if ((frame % stride) == 0)
+        {
+            std::copy (level.begin(), level.end(), hist.begin() + (size_t) (histCount % 4) * (size_t) (half + 1));
+            histFilled = juce::jmin (histFilled + 1, 4);
+            ++histCount;
+        }
         ++frame;
 
         std::sort (out, out + n, [] (const Candidate& x, const Candidate& y) { return x.prom > y.prom; });
@@ -271,4 +277,6 @@ private:
     std::vector<int> persist, persistNew;
     int ringPos = 0, hopCount = 0, histFilled = 0;
     long frame = 0;
+    long histCount = 0;
+    int stride = 1;
 };
