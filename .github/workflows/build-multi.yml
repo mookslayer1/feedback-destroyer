@@ -1,0 +1,50 @@
+name: Build Freqd Out Multi v5.0 (macOS)
+# Builds only the Multi plugin (its own identity: Sjam / Fqmu), so it installs next to v4.1.
+
+on:
+  push:
+    branches: [ multi-v5 ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFD_BUILD_V4=OFF -DFD_BUILD_MULTI=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Sign and package the VST3
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          bundle="build/FreqdOutMulti_artefacts/Release/VST3/Freqd Out Multi v5.0.vst3"
+
+          if [[ ! -d "$bundle" ]]; then
+            echo "Expected VST3 bundle not found: $bundle"
+            find build -type d -name '*.vst3' -print
+            exit 1
+          fi
+
+          codesign --force --deep --sign - "$bundle"
+
+          mkdir -p pkgroot/Library/Audio/Plug-Ins/VST3
+          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out Multi v5.0.vst3"
+
+          pkgbuild --root pkgroot \
+            --identifier com.sjamaudio.freqdoutmulti.vst3 \
+            --version 5.0.0 \
+            --install-location / \
+            "dist/FreqdOutMulti-v5.0-VST3-macOS.pkg"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreqdOutMulti-v5.0-VST3-macOS-installer
+          path: dist/FreqdOutMulti-v5.0-VST3-macOS.pkg
