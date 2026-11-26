@@ -1,5 +1,5 @@
-name: Build Freqd Out Multi v5.0 (macOS)
-# Builds only the Multi plugin (its own identity: Sjam / Fqmu), so it installs next to v4.1.
+name: Build Freqd Out Multi v6.0 (macOS)
+# Builds only the Multi plugin (its own identity: Sjam / Fqm6), so it installs next to v4.1.
 
 on:
   push:
@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          bundle="build/FreqdOutMulti_artefacts/Release/VST3/Freqd Out Multi v5.0.vst3"
+          bundle="build/FreqdOutMulti_artefacts/Release/VST3/Freqd Out Multi v6.0.vst3"
 
           if [[ ! -d "$bundle" ]]; then
             echo "Expected VST3 bundle not found: $bundle"
@@ -35,16 +35,23 @@ jobs:
           codesign --force --deep --sign - "$bundle"
 
           mkdir -p pkgroot/Library/Audio/Plug-Ins/VST3
-          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out Multi v5.0.vst3"
+          ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out Multi v6.0.vst3"
+
+          # Always install to the folder above (never "relocate" to some other copy), and always overwrite.
+          pkgbuild --analyze --root pkgroot components.plist
+          /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" components.plist
+          /usr/libexec/PlistBuddy -c "Set :0:BundleIsVersionChecked false" components.plist
+          /usr/libexec/PlistBuddy -c "Set :0:BundleOverwriteAction upgrade" components.plist
 
           pkgbuild --root pkgroot \
-            --identifier com.sjamaudio.freqdoutmulti.vst3 \
-            --version 5.0.0 \
+            --component-plist components.plist \
+            --identifier com.sjamaudio.freqdoutmulti6.vst3 \
+            --version 6.0.0 \
             --install-location / \
-            "dist/FreqdOutMulti-v5.0-VST3-macOS.pkg"
+            "dist/FreqdOutMulti-v6.0-VST3-macOS.pkg"
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: FreqdOutMulti-v5.0-VST3-macOS-installer
-          path: dist/FreqdOutMulti-v5.0-VST3-macOS.pkg
+          name: FreqdOutMulti-v6.0-VST3-macOS-installer
+          path: dist/FreqdOutMulti-v6.0-VST3-macOS.pkg

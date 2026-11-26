@@ -7,7 +7,7 @@ set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build for Apple Silicon
 project(FeedbackDestroyer VERSION 4.1.0)
 
 option(FD_BUILD_V4 "Build Freqd Out v4.1" ON)
-option(FD_BUILD_MULTI "Build Freqd Out Multi v5.0" OFF)
+option(FD_BUILD_MULTI "Build Freqd Out Multi v6.0" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,15 +59,16 @@ endif()
 
 if(FD_BUILD_MULTI)
     juce_add_plugin(FreqdOutMulti
+        VERSION 6.0.0
         COMPANY_NAME "SJAM Audio"
-        BUNDLE_ID com.sjamaudio.freqdoutmulti
+        BUNDLE_ID com.sjamaudio.freqdoutmulti6
         PLUGIN_MANUFACTURER_CODE Sjam
-        PLUGIN_CODE Fqmu
+        PLUGIN_CODE Fqm6
         FORMATS VST3
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
-        PRODUCT_NAME "Freqd Out Multi v5.0"
+        PRODUCT_NAME "Freqd Out Multi v6.0"
         DESCRIPTION "Staged feedback suppression: listen, measure, ring out, verify"
         VST3_CATEGORIES "Fx")
 

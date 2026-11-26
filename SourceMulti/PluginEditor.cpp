@@ -153,7 +153,7 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (juce::Colours::white);
     g.setFont (20.0f);
-    g.drawText ("Freqd Out Multi v5.0", 20, 14, 360, 28, juce::Justification::centredLeft);
+    g.drawText ("Freqd Out Multi v6.0", 20, 14, 360, 28, juce::Justification::centredLeft);
 
     g.setColour (kStripFill);
     g.fillRect (heatStrip);
