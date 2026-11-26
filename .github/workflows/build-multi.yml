@@ -38,10 +38,26 @@ jobs:
           ditto "$bundle" "pkgroot/Library/Audio/Plug-Ins/VST3/Freqd Out Multi v6.0.vst3"
 
           # Always install to the folder above (never "relocate" to some other copy), and always overwrite.
-          pkgbuild --analyze --root pkgroot components.plist
-          /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" components.plist
-          /usr/libexec/PlistBuddy -c "Set :0:BundleIsVersionChecked false" components.plist
-          /usr/libexec/PlistBuddy -c "Set :0:BundleOverwriteAction upgrade" components.plist
+          cat > components.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <array>
+            <dict>
+              <key>RootRelativeBundlePath</key>
+              <string>Library/Audio/Plug-Ins/VST3/Freqd Out Multi v6.0.vst3</string>
+              <key>BundleIsRelocatable</key>
+              <false/>
+              <key>BundleIsVersionChecked</key>
+              <false/>
+              <key>BundleHasStrictIdentifier</key>
+              <false/>
+              <key>BundleOverwriteAction</key>
+              <string>upgrade</string>
+            </dict>
+          </array>
+          </plist>
+          PLIST
 
           pkgbuild --root pkgroot \
             --component-plist components.plist \
