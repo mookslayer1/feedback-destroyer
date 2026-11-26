@@ -56,6 +56,10 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    // Tuning knobs (set by the test harness; the plugin uses these defaults)
+    float startQ = 28.f;            // Q of a newly placed notch (28 is surgical; 12 is about 1.4 semitones wide)
+    float neighbourSemis = 0.f;     // if > 0, a new peak this close (in semitones) to an existing notch is folded into it
+
     juce::AudioProcessorValueTreeState apvts;
     std::array<SlotInfo, kSlots> info;
     std::array<std::atomic<float>, kHeatBins> heat;
@@ -161,13 +165,13 @@ private:
     std::vector<float> loopL;            // measured loop gain per bin (dB)
     std::array<float, 200> bandL {};     // loop gain per 1/12-octave band
     int  stageMode = 1;                  // 0 quick, 1 standard, 2 thorough
-    float listenSec = 30.f, verifyHoldSec = 5.f, verifyMaxExtraDb = 6.f;
+    float listenSec = 5.f, verifyHoldSec = 5.f;
     bool verifyOn = true;
     long burstPos = 0;
     int  burstAttempts = 0;
     float burstDbNow = -35.f;
     float stageTime = 0.f;
-    float verifyGain = 0.f, verifyClean = 0.f;
+    float verifyClean = 0.f;
     float safetyDbNow = 3.f;
     float ceilingDb = 12.f, maxCutDb = 12.f;
     int   verifyCycles = 0;

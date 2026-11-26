@@ -447,7 +447,8 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
 
         // As the bank fills, close neighbours are folded into one wider notch to keep slots spare.
         const int freeSlots = freeSlotCount();
-        const double mergeRatio = freeSlots > 24 ? 0.06 : (freeSlots > 12 ? 0.12 : kMergeThirdOctave);
+        const double nbRatio = neighbourSemis > 0.f ? std::pow (2.0, neighbourSemis / 12.0) - 1.0 : 0.0;
+        const double mergeRatio = juce::jmax (nbRatio, freeSlots > 24 ? 0.06 : (freeSlots > 12 ? 0.12 : kMergeThirdOctave));
 
         if (mergeIntoExisting (f, mergeRatio))
             continue;
@@ -471,7 +472,7 @@ void FeedbackDestroyerAudioProcessor::handleCandidates (const Candidate* cands, 
         if (! merged && nt < 3)
         {
             tg[nt].f = f;
-            tg[nt].q = kQNarrow;
+            tg[nt].q = juce::jlimit (kQWidest, kQNarrow, (double) startQ);
             ++nt;
         }
     }
@@ -542,22 +543,12 @@ void FeedbackDestroyerAudioProcessor::housekeeping()
 
     if (st == Verifying)
     {
+        // Hold at the test gain with the notches locked; any ring sends us back to ring-out (see runAnalysis).
         stageTime += (float) hopSec;
-        stageProgress.store (juce::jlimit (0.f, 1.f, (verifyGain - ceilingDb) / juce::jmax (1.f, verifyMaxExtraDb)));
+        stageProgress.store (juce::jlimit (0.f, 1.f, stageTime / verifyHoldSec));
 
         if (stageTime >= verifyHoldSec)
-        {
-            verifyClean = verifyGain;
-            stageTime = 0.f;
-
-            if (verifyGain + 3.f > ceilingDb + verifyMaxExtraDb + 0.01f)
-                endVerify (true);
-            else
-            {
-                verifyGain += 3.f;
-                gainDb = verifyGain;
-            }
-        }
+            endVerify (true);
 
         return;
     }
@@ -607,7 +598,6 @@ void FeedbackDestroyerAudioProcessor::startProcess()
     listenSec = 5.f;                    // a short, fixed listen at the start of every run
     verifyOn = stageMode != 0;
     verifyHoldSec = stageMode == 2 ? 8.f : 5.f;
-    verifyMaxExtraDb = stageMode == 2 ? 9.f : 6.f;
 
     gainDb = 0.f;                       // measure the room at unity so the margin reading is meaningful
     ceilingDb = juce::jlimit (6.f, 18.f, apvts.getRawParameterValue ("push")->load());
@@ -924,9 +914,7 @@ void FeedbackDestroyerAudioProcessor::beginRingOut()
 
 void FeedbackDestroyerAudioProcessor::beginVerify()
 {
-    verifyClean = gainDb;
-    verifyGain = gainDb + 3.f;
-    gainDb = verifyGain;
+    verifyClean = gainDb;           // the gain being verified
     stageTime = 0.f;
     stageProgress.store (0.f);
     lowA.clearTracking();
@@ -938,7 +926,7 @@ void FeedbackDestroyerAudioProcessor::beginVerify()
 void FeedbackDestroyerAudioProcessor::endVerify (bool clean)
 {
     secureAll();
-    verifiedExtraDb.store (juce::jmax (0.f, verifyClean));   // highest gain that held clean
+    verifiedExtraDb.store (juce::jmax (0.f, verifyClean));   // the test gain that was verified
     verifyResult.store (clean ? 1 : 2);
     gainDb = 0.f;                    // the raised gain was only test pressure; leave the channel at unity
     endReason.store (EndCeiling);
@@ -1118,7 +1106,10 @@ void FeedbackDestroyerAudioProcessor::handleCommands()
                 if (st == Running)
                     finishProcess (EndStopped);
                 else if (st == Verifying)
+                {
                     endVerify (true);
+                    verifyResult.store (0);        // stopped early: not verified
+                }
                 else if (st == Listening || st == Measuring)
                     procState.store (Idle);       // nothing has been changed yet, so just stop
             }

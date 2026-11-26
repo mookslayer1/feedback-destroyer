@@ -23,9 +23,9 @@ namespace
 FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (FeedbackDestroyerAudioProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    setSize (760, 600);
+    setSize (760, 575);
 
-    for (auto* button : { &startButton, &lockAllButton, &resetButton })
+    for (auto* button : { &startButton, &resetButton })
     {
         button->setColour (juce::TextButton::buttonColourId, kStripFill);
         button->setColour (juce::TextButton::textColourOffId, juce::Colours::white);
@@ -48,13 +48,6 @@ FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (Fe
     addAndMakeVisible (safetySlider);
     safetyAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         proc.apvts, "safety", safetySlider);
-
-    burstSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    burstSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
-    burstSlider.setTextValueSuffix (" dB");
-    addAndMakeVisible (burstSlider);
-    burstAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-        proc.apvts, "burstLevel", burstSlider);
 
     for (auto* sl : { &pushSlider, &maxCutSlider })
     {
@@ -82,7 +75,6 @@ FeedbackDestroyerAudioProcessorEditor::FeedbackDestroyerAudioProcessorEditor (Fe
                                       : FeedbackDestroyerAudioProcessor::CmdStart);
     };
 
-    lockAllButton.onClick = [this] { proc.uiCommand.store (FeedbackDestroyerAudioProcessor::CmdLockAll); };
     resetButton.onClick   = [this] { proc.uiCommand.store (FeedbackDestroyerAudioProcessor::CmdReset); };
 
     startTimerHz (30);
@@ -132,15 +124,13 @@ void FeedbackDestroyerAudioProcessorEditor::resized()
     heatStrip = { 56, 58, 650, 36 };
     strip     = { 56, 104, 650, 190 };
 
-    startButton.setBounds (440, 14, 88, 30);
-    lockAllButton.setBounds (536, 14, 88, 30);
+    startButton.setBounds (536, 14, 88, 30);
     resetButton.setBounds (632, 14, 74, 30);
     lowLimitSlider.setBounds (150, 478, 360, 24);
     modeBox.setBounds (610, 478, 96, 24);
     safetySlider.setBounds (150, 508, 240, 24);
-    burstSlider.setBounds (466, 508, 240, 24);
-    pushSlider.setBounds (150, 538, 240, 24);
-    maxCutSlider.setBounds (466, 538, 240, 24);
+    pushSlider.setBounds (466, 508, 240, 24);
+    maxCutSlider.setBounds (150, 538, 240, 24);
 }
 
 void FeedbackDestroyerAudioProcessorEditor::timerCallback()
@@ -314,14 +304,11 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (juce::Colours::grey);
     g.setFont (12.0f);
-    g.drawText ("Blue: locked   Amber: searching   Grey: off   White outline: manual cut   Shaded: notch width",
+    g.drawText ("Blue: locked   Amber: searching   Grey: off   White outline: manual   Shaded: notch width   |   Hover: frequency   Drag: deeper   Wheel: Q   Double-click: on / off",
                 strip.getX(), strip.getBottom() + 22, strip.getWidth(), 16,
                 juce::Justification::centredLeft);
-    g.drawText ("Hover for frequency   |   Drag a fader to cut deeper   |   Wheel: Q   |   Double-click: on / off",
-                strip.getX(), strip.getBottom() + 40, strip.getWidth(), 16,
-                juce::Justification::centredLeft);
     g.drawText ("Under the heat strip:  grey = steady room tone (ignored unless it grows)   pink = band the burst flagged (watched closely)",
-                strip.getX(), strip.getBottom() + 58, strip.getWidth(), 16,
+                strip.getX(), strip.getBottom() + 40, strip.getWidth(), 16,
                 juce::Justification::centredLeft);
 
     const int ps = proc.procState.load();
@@ -356,10 +343,9 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
             status += "  (" + juce::String (proc.tidiedAtEnd.load()) + " overlapping merged)";
 
         if (proc.verifyResult.load() == 1)
-            status = "COMPLETE  -  clean to +" + juce::String (juce::roundToInt (proc.verifiedExtraDb.load())) + " dB test gain, notches locked";
+            status = "COMPLETE  -  verified clean at +" + juce::String (juce::roundToInt (proc.verifiedExtraDb.load())) + " dB test gain, notches locked";
         else if (proc.verifyResult.load() == 2)
-            status = "LOCKED  -  clean to +" + juce::String (juce::roundToInt (proc.verifiedExtraDb.load()))
-                   + " dB; feedback persisted above that";
+            status = "LOCKED  -  feedback still appeared at +" + juce::String (juce::roundToInt (proc.verifiedExtraDb.load())) + " dB test gain";
 
         if (proc.limitedByCut.load())
             status += "  (held back by Max cut)";
@@ -386,15 +372,13 @@ void FeedbackDestroyerAudioProcessorEditor::paint (juce::Graphics& g)
     g.setFont (16.0f);
     g.drawText (status, 56, 395, 650, 22, juce::Justification::centredLeft);
 
-    g.setFont (14.0f);
     g.setFont (13.0f);
     g.setColour (juce::Colours::grey);
     g.drawText ("Low limit", 56, 478, 90, 24, juce::Justification::centredLeft);
     g.drawText ("Stages", 548, 478, 56, 24, juce::Justification::centredLeft);
     g.drawText ("Safety cut", 56, 508, 90, 24, juce::Justification::centredLeft);
-    g.drawText ("Burst level", 394, 508, 70, 24, juce::Justification::centredLeft);
-    g.drawText ("Test gain", 56, 538, 90, 24, juce::Justification::centredLeft);
-    g.drawText ("Max cut", 394, 538, 70, 24, juce::Justification::centredLeft);
+    g.drawText ("Test gain", 394, 508, 70, 24, juce::Justification::centredLeft);
+    g.drawText ("Max cut", 56, 538, 90, 24, juce::Justification::centredLeft);
     g.setColour (juce::Colours::white);
     g.setFont (14.0f);
     double costOct = 0.0;

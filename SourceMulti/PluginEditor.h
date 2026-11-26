@@ -27,12 +27,11 @@ private:
     FeedbackDestroyerAudioProcessor& proc;
 
     juce::TextButton startButton { "START" };
-    juce::TextButton lockAllButton { "Lock all" };
     juce::TextButton resetButton { "Reset" };
 
-    juce::Slider lowLimitSlider, safetySlider, burstSlider, pushSlider, maxCutSlider;
+    juce::Slider lowLimitSlider, safetySlider, pushSlider, maxCutSlider;
     juce::ComboBox modeBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lowLimitAttach, safetyAttach, burstAttach, pushAttach, maxCutAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lowLimitAttach, safetyAttach, pushAttach, maxCutAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttach;
 
     juce::Rectangle<int> strip, heatStrip;
